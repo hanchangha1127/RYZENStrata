@@ -70,7 +70,16 @@ def windows_engine_usable(directory: Path) -> bool:
 def windows_release_cache() -> Path | None:
     if not re.fullmatch(r"[0-9a-f]{64}", _WINDOWS_ENGINE_SHA256) or _WINDOWS_ENGINE_BYTES <= 0:
         return None
-    return ROOT / "dist" / "windows-engine" / f"{_WINDOWS_ENGINE_TAG}-{_WINDOWS_ENGINE_SHA256[:12]}"
+    cache = ROOT / "dist" / "windows-engine" / f"{_WINDOWS_ENGINE_TAG}-{_WINDOWS_ENGINE_SHA256[:12]}"
+    if os.name != "nt":
+        return cache
+    # ROCm's nested kernel filenames can exceed MAX_PATH during extraction.
+    path = str(cache.resolve())
+    if path.startswith("\\\\?\\"):
+        return Path(path)
+    if path.startswith("\\\\"):
+        return Path("\\\\?\\UNC\\" + path[2:])
+    return Path("\\\\?\\" + path)
 
 
 @contextmanager
