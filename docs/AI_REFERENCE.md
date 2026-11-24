@@ -7,6 +7,7 @@ RYZENStrata serves text with [ISTA-DASLab Qwen3.8-Flash-Next GSQ-RCO Q2_0](https
 - The 256K default is 262,144 tokens. K and V use the engine's `int8` cache mode by default.
 - The native GPU path uses fused QSA attention with online softmax for prompt processing. Decode uses the GPU's paged attention path.
 - The main weights are prepared from the publisher's Q2_0 shards. The second shard supplies the N-gram table. The prepared table stays on SSD and the engine reads its rows with direct I/O.
+- The routed experts stay in the first GGUF on disk. The small `native_experts.txt` index records offsets so the HIP engine can fill its GPU expert cache directly from the GGUF. Setup creates no separate `experts.bin` weight copy.
 - The DFlash2 drafter uses Q4_0 weights. See the [original drafter](https://huggingface.co/incoai/Qwen3.8-Flash-Next-DFlash2).
 - On Windows gfx1151 the engine uses matrix cores for Q2_0 expert prefill and batched DFlash2 context updates. Small verification windows use GPU matrix-vector kernels selected for the model's actual projection shapes. Floating-point rounding can differ between kernels.
 - A 64 GiB Windows system uses an 8,192-token automatic prefill chunk to leave memory for pinned verification buffers. The default context window is 262,144 tokens.
