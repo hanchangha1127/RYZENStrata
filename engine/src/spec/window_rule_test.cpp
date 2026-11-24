@@ -67,6 +67,22 @@ int main() {
         in.use_mtp = false; in.draft_on = false; in.start = 1;
         check(choose_window(in) == 1, "no MTP (serve): one row unless a lookup fires");
     }
+    {
+        const float pr[] = {0.5f, 0.5f, 0.75f, 0.9f};
+        WindowRuleIn in;
+        in.draft_on = true; in.df2_active = true; in.cap = 5; in.start = 5;
+        in.spec_min_p = 0.75; in.draft_conf = 0.25; in.dprob = pr;
+        check(prefetch_window_rows(in, 8) == 3, "prefetch reuses cumulative confidence, including equality, and counts the anchor");
+        check(prefetch_window_rows(in, 3) == choose_window(in), "exactly enough context: request the whole verification window");
+        check(prefetch_window_rows(in, 2) == 0, "context exhausted by the planned width: request no rows");
+        in.draft_conf = 0.8;
+        check(prefetch_window_rows(in, 1) == 1, "confidence rejects the first draft: request only the anchor");
+        check(prefetch_window_rows(in, 0) == 0, "no room even for the anchor: request no rows");
+        in.draft_conf = 0.0;
+        check(prefetch_window_rows(in, 8) == 1, "with confidence disabled, prefetch follows independent min-p");
+        in.spec_min_p = 0.0;
+        check(prefetch_window_rows(in, 8) == 5, "without any threshold, every verification row is prefetched");
+    }
     {   // 2. exhaustive over the small input space; random probabilities
         std::srand(7);
         long n = 0, same = 0, differ_df2_cost = 0, differ_other = 0;

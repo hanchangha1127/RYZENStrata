@@ -54,6 +54,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <stdexcept>
 #include <type_traits>
 
 #if !defined(STRATA_FUSED_DECODE_ONLY) && !defined(STRATA_FUSED_GEO_N_EMBD)
@@ -3057,6 +3058,13 @@ bool tq_hip_requested();   // (STRATA_PF_FUSED_TQ on HIP: below)
 bool tq_hip_device(const DevInfo& d);   // (the trellis instances on this device: gfx12, gfx1151 by its own rule; below)
 bool q8gu_hip_requested();   // (STRATA_PF_FUSED_Q8GU on HIP: below)
 bool q6k_hip_requested();    // (STRATA_PF_FUSED_Q6K on HIP: below)
+bool gfx1151_q2_wmma(const DevInfo& d) {
+    static const bool requested = [] {
+        const char* value = std::getenv("STRATA_RYZEN_Q2_WMMA");
+        return value && std::strcmp(value, "1") == 0;
+    }();
+    return requested && d.g1151 && h11p_wanted();
+}
 #endif
 bool gu_covered(int t) {
     return t == T_IQ2_XXS || t == T_IQ2_XS || t == T_IQ2_S || t == T_IQ3_XXS || t == T_IQ3_S || t == T_IQ4_XS
@@ -3069,7 +3077,7 @@ bool gu_covered(int t) {
            || (t == T_NVFP4 && dev_info().nvfp4)                    // the NVFP4 kernels set up (native_supported: the NVFP4 / NVFP4 pair, its switches)
 #endif
 #if defined(__HIPCC__)
-           || (t == T_Q2_0 && dev_info().w12)   // gfx12: the native Q2_0 pack's gate/up on native_w11_kernel (64-value blocks)
+           || (t == T_Q2_0 && (dev_info().w12 || gfx1151_q2_wmma(dev_info())))
            || ((t == T_Q4_K || t == T_Q5_K) && kq_on())   // the gfx11 kernels only
            || ((t == T_TQK6 || t == T_TQ2_T) && tq_hip_device(dev_info()))   // STRATA_PF_FUSED_TQ=1 on gfx12; gfx1151 by fused_tq_hip.hpp
            || (t == T_Q8_0 && dev_info().w12 && q8gu_hip_requested())   // STRATA_PF_FUSED_Q8GU=1 on gfx12
@@ -3533,6 +3541,8 @@ bool native_supported(int gu_type, int d_type) {
     if (gu_type == T_Q2_0 && d_type != T_Q2_0) return false;   // the opt-in (STRATA_PF_FUSED=1 as well) takes the Q2_0 / Q2_0 pair only
 #endif
 #if defined(__HIPCC__)
+    if (gu_type == T_Q2_0 && dev_info().g1151)
+        return d_type == T_Q2_0 && dev_info().ok && gfx1151_q2_wmma(dev_info());
     // The trellis pairs on gfx12 (opt-in STRATA_PF_FUSED_TQ=1; gu_covered checked it above) and on gfx1151 (tq_hip_pair): Gyro-S's TQK6 / TQK7 and Gyro-M's TQ2_T / TQ2_T only, with
     // CUDA's geometry rule (whole 128-value blocks along both K; a folded down's FP32 H row inside the row's own n_embd-float output row).  Any other
     // pairing with a trellis format: MMQ.
@@ -3715,8 +3725,11 @@ void experts_native(const Batch& b, const NativeGeom& g, int n_expert, int64_t n
         }
         // STRATA_PF_F16=2 (gfx11 WMMA): 128-token pair FP16 WMMA kernel (native_h11p_kernel) on FP16 layer input (m.mixed_h)
         // with empty-column skip, 128B nibble sign LUT (3 blocks/WGP), and optional FP16 down output (moe_combine16).
-        if (h11p_wanted() && g_p1a_x16 != nullptr && !g_rot_on && d.g11_wmma && h11p_takes_pair(g.gu_type, g.d_type) &&
-            (size_t) n * kMoeFF * 2 <= g_p1a_h_bytes) {
+        const bool use_h11p = h11p_wanted() && g_p1a_x16 != nullptr && !g_rot_on && d.g11_wmma &&
+                              h11p_takes_pair(g.gu_type, g.d_type) && (size_t) n * kMoeFF * 2 <= g_p1a_h_bytes;
+        if (g.gu_type == T_Q2_0 && d.g1151 && (!use_h11p || g.d_type != T_Q2_0))
+            throw std::runtime_error("gfx1151 Q2_0 WMMA experts require FP16 input and scratch, and an unfolded Q2_0 down projection");
+        if (use_h11p) {
             const int64_t gp_gu_items = (tiles / 2 + (b.e1 - b.e0)) * (GU_ROWS_N / NW_ROWS);
             const int64_t gp_d_items = (tiles / 2 + (b.e1 - b.e0)) * (D_ROWS_N / NW_ROWS);
             const _Float16* x16 = (const _Float16*) g_p1a_x16;
@@ -3749,6 +3762,13 @@ void experts_native(const Batch& b, const NativeGeom& g, int n_expert, int64_t n
             else STRATA_NH_D(T_IQ4_NL);
 #undef STRATA_NH_D
             ck(cudaGetLastError(), "experts_native (h11p)");
+            if (g.gu_type == T_Q2_0 && d.g1151) {
+                static const bool announced = [] {
+                    std::fprintf(stderr, "strata prefill: native Q2_0 gate/up and down on gfx1151 FP16 WMMA\n");
+                    return true;
+                }();
+                (void) announced;
+            }
             return;
         }
         // W (X1): LDS alias of the H tile + waves_per_eu(8) (192 VGPRs) + 4 blocks per WGP, only for the types whose

@@ -15,12 +15,15 @@ DEFAULT_CONTEXT = 262144
 CONTEXTS = (8192, 32768, 65536, 131072, 204800, DEFAULT_CONTEXT)
 KV = "int8"
 DRAFTER = "dflash2"
+DFLASH_WINDOW = 7 if os.name == "nt" else 4
+DFLASH_CONFIDENCE = 0.35
 MIN_RAM_GIB = 64
 RECOMMENDED_VRAM_GIB = 48
 GPU_ONLY_FLAG = "--gpu-experts-only"
 MODEL_ERROR = f"This edition supports only {TITLE}."
 GPU_ERROR = "This edition requires the integrated AMD Radeon gfx1151 GPU."
-ENGINE_ERROR = f"This edition requires the Ryzen HIP engine with {GPU_ONLY_FLAG}. Build it from this fork."
+ENGINE_PROFILE = "RYZENStrata HIP profile v2"
+ENGINE_ERROR = f"This edition requires {ENGINE_PROFILE}. Build the engine from this checkout."
 CPU_NAME = re.compile(r"\bAMD Ryzen AI Max\+\s+(?:PRO\s+)?(?:395|495)\b", re.IGNORECASE)
 
 
@@ -119,7 +122,7 @@ def engine_has_profile(exe: Path, *, env: dict | None = None) -> bool:
                                encoding="utf-8", errors="replace", timeout=20, env=env)
     except (OSError, subprocess.TimeoutExpired):
         return False
-    return GPU_ONLY_FLAG in probe.stdout or GPU_ONLY_FLAG in probe.stderr
+    return ENGINE_PROFILE in probe.stdout or ENGINE_PROFILE in probe.stderr
 
 
 def runtime_problem(cfg: dict) -> str | None:
@@ -161,7 +164,7 @@ def apply_runtime(cfg: dict, context: int, drafting: str) -> None:
         groups = user_args.groups(cfg.get(key))
         cfg[key] = user_args.flat([g for g in groups if g[0].partition("=")[0] not in blocked | {GPU_ONLY_FLAG}])
     cfg["args"] += [GPU_ONLY_FLAG, "--max-context", str(context), "--kv", KV, "--ple-io", "direct",
-                    "--mmap-experts", "--prefill", "auto", "--spec", "4"]
+                    "--mmap-experts", "--prefill", "auto", "--spec", str(DFLASH_WINDOW if drafting == DRAFTER else 4)]
     cfg.update(backend="hip", parallel=1, mtp=False, drafting=drafting, ryzen_profile=True)
     for key in ("vision", "images", "split_engine", "split_serve", "split_fallback", "replicas", "gpu_roles", "gpu_none"):
         cfg.pop(key, None)

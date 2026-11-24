@@ -740,6 +740,22 @@ int selftest(const std::string& dir, uint32_t rb) {
     return g_fail ? 1 : 0;
 }
 
+// The early anchor and late proposals need the same hash keys as a full
+// window issued after drafting. Include an EOS to check the cutoff as well.
+void prefetch_predecessors() {
+    const int32_t tokens[] = {313, 509, k::PLE_EOS_TOKEN_ID, 709};
+    const int32_t batch_prev[] = {71, 131, 131, 313, 313, 509, 509, k::PLE_EOS_TOKEN_ID};
+    uint32_t expected[4 * k::PLE_N_HEADS], actual[4 * k::PLE_N_HEADS];
+    const auto c = k::ple_artifact_consts();
+    k::ngram_rows(tokens, batch_prev, 4, c, expected);
+    int32_t prev[2] = {71, 131};
+    k::ngram_rows_advance(tokens[0], prev, c, actual);
+    CHECK(prev[0] == 131 && prev[1] == 313, "prefetch anchor advances the local oldest-first predecessor pair");
+    for (int i = 1; i < 4; ++i)
+        k::ngram_rows_advance(tokens[i], prev, c, actual + i * k::PLE_N_HEADS);
+    CHECK(std::memcmp(expected, actual, sizeof expected) == 0, "separate anchor and proposal prefetches match the verify-window PLE keys");
+}
+
 int real(const std::string& gguf, int n_random, const std::string& tokens_path, uint32_t inflight, bool direct_first,
          bool direct_only, bool sync_submit) {
     k::PleTable mm, direct;
@@ -835,6 +851,7 @@ int main(int argc, char** argv) {
         else { std::fprintf(stderr, "usage: ple_reader_test --selftest [--dir D] | --gguf SHARD2 [--rows N] [--tokens F]\n"); return 2; }
     }
     if (self) {
+        prefetch_predecessors();
         // ng::ROW_BYTES (90, IQ4_NL, production default) and 110 (#296, OrcaRouter's Q5_0 PLE rows) through the
         // same generic row_bytes path -- see the comment on selftest().
         all_formats_round_trip(dir);               // every format of k::ple_formats(), both readers, vs its dequantizer

@@ -5559,8 +5559,8 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
         int miss_rank = 0, groups = 0, entries = 0, fetches = 0;
         GpuPlanSink& P = *d.plan;
         const uint64_t bb = lay.blob_bytes(d.layers);
-        const uint8_t* dma_src[64];
-        int64_t pcie_i0[64];
+        const uint8_t* dma_src[kMaxExpertFetches];
+        int64_t pcie_i0[kMaxExpertFetches];
         // STRATA_ADAPT_FETCH: the share is the layer's most-routed misses, and the ones the tier would swap in are copied
         // into a slot as they are fetched (ExpertDispatch::fetch_admit)
         const bool fetch_on = !d.gpu_only && m > 0 && d.fetch_can(d.layers);
@@ -5603,7 +5603,7 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
                     kd = 0;                        // Foresight: a landed swap-space slot holds it - a GPU group like a hit
                 } else {
                     if (d.fs != nullptr) d.fs->note_miss(d.src, d.layers, e);
-                    if ((fetch_on ? pick[q] : miss_rank >= nmiss - m) && fetches < P.staging_cap && fetches < 64) {
+                    if ((fetch_on ? pick[q] : miss_rank >= nmiss - m) && fetches < P.staging_cap && fetches < kMaxExpertFetches) {
                         const bool stage = d.gpu_only && P.host_staging != nullptr && P.mapped_staging != nullptr;
                         const uint8_t* src = (stage || d.src->pinned(d.layers, e)) ? d.src->blob(d.layers, e) : nullptr;
                         if (src != nullptr) {
@@ -5662,13 +5662,13 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
             if (d.fetch_mark.size() != (size_t) d.n_expert) d.fetch_mark.assign((size_t) d.n_expert, 0);
             for (int64_t i = 0; i < n; ++i)
                 if (ids[i] >= 0 && ids[i] < d.n_expert) d.fetch_mark[(size_t) ids[i]] = 1;
-            int cq[64], nc = 0;
+            int cq[kMaxExpertFetches], nc = 0;
             for (int q = 0; q < fetches; ++q) {
                 const int32_t e = ids[pcie_i0[q]];
                 if (use[e] >= d.fetch_min && (d.in_flight.empty() || d.in_flight[lb + (size_t) e] == 0)) cq[nc++] = q;
             }
             std::stable_sort(cq, cq + nc, [&](int a, int b) { return use[ids[pcie_i0[a]]] > use[ids[pcie_i0[b]]]; });
-            int32_t vic[64];
+            int32_t vic[kMaxExpertFetches];
             int nv = 0;
             for (int32_t e = 0; e < (int32_t) d.n_expert && nc > 0; ++e) {
                 if (d.res_mut[lb + (size_t) e] < 0 || d.fetch_mark[(size_t) e] != 0 ||

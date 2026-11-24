@@ -1061,11 +1061,12 @@ __device__ __forceinline__ void df2_mma_s8_m16n8k32(int32_t (&d)[4], uint32_t a0
         : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
 }
 
+#endif
+
 // Exact bit-parallel conversion of four 4-bit unsigned nibbles q in [0..15] (in bytes 0..3) to signed int8 (q - 8) in [-8..7].
 __device__ __forceinline__ uint32_t df2_u4x4_to_s8x4(uint32_t q) {
     return (q & 0x07070707u) | ((~q & 0x08080808u) * 0x1Fu);
 }
-#endif
 
 template <bool Q4>
 __global__ void __launch_bounds__(128) gemm_tc_kernel(Df2Segs segs, const int8_t* __restrict__ xq,
@@ -1299,6 +1300,117 @@ __global__ void __launch_bounds__(128) gemm_batch_tc_kernel(Df2Segs segs, const 
     (void) segs; (void) xq; (void) xd; (void) n_in; (void) ncols;
 #endif
 }
+
+#if defined(__HIPCC__)
+constexpr int kDf2BatchWmmaCols = 64;
+
+// One block covers 16 rows of one matrix and four Wave32 tiles of 16 input columns.
+// The waves share the unpacked weights for four K blocks at a time.
+__global__ void __launch_bounds__(128) gemm4_batch_wmma_gfx1151_kernel(
+        Df2Segs segs, const int8_t* __restrict__ xq, const float* __restrict__ xd, int n_in, int ncols) {
+#if defined(__gfx1151__)
+    using i4 = __attribute__((__vector_size__(4 * sizeof(int)))) int;
+    using i8 = __attribute__((__vector_size__(8 * sizeof(int)))) int;
+    constexpr int kRows = 16;
+    constexpr int kBlocks = 4;
+    __shared__ alignas(16) int4 s_wq[kBlocks][kRows][2];
+    __shared__ alignas(16) int4 s_xq[kBlocks][kDf2BatchWmmaCols][2];
+    __shared__ float s_wd[kBlocks][kRows];
+    __shared__ float s_xd[kBlocks][kDf2BatchWmmaCols];
+
+    const int tid = threadIdx.x;
+    const int lane = tid & 31;
+    const int hi = lane >> 4;
+    const int lane_col = lane & 15;
+    const int wave_col = (tid >> 5) * 16;
+    const int col = wave_col + lane_col;
+    const int col0 = blockIdx.y * kDf2BatchWmmaCols;
+    const int cols = min(kDf2BatchWmmaCols, ncols - col0);
+    const int row_g = blockIdx.x * kRows;
+    const Df2Seg sg = df2_pick(segs, row_g);
+    const int row0 = row_g - sg.row0;
+    const int nb = n_in / 32;
+    const int4* xq4 = reinterpret_cast<const int4*>(xq);
+    float acc[8] = {};
+
+    for (int b0 = 0; b0 < nb; b0 += kBlocks) {
+        if (tid < kBlocks * kRows) {
+            const int b = tid / kRows;
+            const int row = tid % kRows;
+            const int r = row0 + row;
+            const int block = b0 + b;
+            const int step = block / 16, bi = block % 16;
+            const size_t plane = (size_t) (r / 8) * 8;
+            const uint4 q = *reinterpret_cast<const uint4*>(
+                sg.q + plane * (n_in / 2) + (size_t) step * 2048 + (r % 8) * 256 + bi * 16);
+            constexpr uint32_t mask = 0x0f0f0f0fu;
+            // q4_tile stores each 16-value half as two words of interleaved 4-value runs.
+            s_wq[b][row][0] = make_int4(df2_u4x4_to_s8x4(q.x & mask), df2_u4x4_to_s8x4((q.x >> 4) & mask),
+                                         df2_u4x4_to_s8x4(q.y & mask), df2_u4x4_to_s8x4((q.y >> 4) & mask));
+            s_wq[b][row][1] = make_int4(df2_u4x4_to_s8x4(q.z & mask), df2_u4x4_to_s8x4((q.z >> 4) & mask),
+                                         df2_u4x4_to_s8x4(q.w & mask), df2_u4x4_to_s8x4((q.w >> 4) & mask));
+            s_wd[b][row] = __half2float(sg.d[plane * nb + (size_t) step * 128 + (r % 8) * 16 + bi]);
+        }
+        for (int i = tid; i < kDf2BatchWmmaCols * kBlocks * 2; i += 128) {
+            const int c = i / (kBlocks * 2);
+            const int part = i % (kBlocks * 2);
+            const int b = part / 2;
+            const int h = part & 1;
+            const size_t xrow = (size_t) (col0 + c);
+            s_xq[b][c][h] = c < cols ? xq4[xrow * (n_in / 16) + b0 * 2 + part] : make_int4(0, 0, 0, 0);
+            if (h == 0) s_xd[b][c] = c < cols ? xd[xrow * nb + b0 + b] : 0.0f;
+        }
+        __syncthreads();
+
+        if (wave_col < cols) {
+#pragma unroll
+            for (int b = 0; b < kBlocks; ++b) {
+                const int4 w0 = s_wq[b][lane_col][0], w1 = s_wq[b][lane_col][1];
+                const int4 x0 = s_xq[b][col][0], x1 = s_xq[b][col][1];
+                const i4 a0 = {w0.x, w0.y, w0.z, w0.w}, a1 = {w1.x, w1.y, w1.z, w1.w};
+                const i4 b0 = {x0.x, x0.y, x0.z, x0.w}, b1 = {x1.x, x1.y, x1.z, x1.w};
+                // Both halves have the same block scales. Reduce the signed dot in
+                // integers, then apply the two scales in FP32 for this block.
+                i8 dot = {};
+                dot = __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32(true, a0, true, b0, dot, false);
+                dot = __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32(true, a1, true, b1, dot, false);
+                const float dx = s_xd[b][col];
+#pragma unroll
+                for (int j = 0; j < 8; ++j)
+                    acc[j] = fmaf(s_wd[b][2 * j + hi] * dx, (float) dot[j], acc[j]);
+            }
+        }
+        __syncthreads();
+    }
+    if (col < cols) {
+#pragma unroll
+        for (int j = 0; j < 8; ++j)
+            sg.y[(size_t) (col0 + col) * sg.n_out + row0 + 2 * j + hi] = acc[j];
+    }
+#else
+    (void) segs; (void) xq; (void) xd; (void) n_in; (void) ncols;
+#endif
+}
+
+bool df2_batch_wmma_gfx1151_enabled() {
+    static const bool enabled = [] {
+        const char* e = std::getenv("STRATA_DF2_BATCH_WMMA");
+        return e != nullptr && e[0] == '1' && e[1] == '\0';
+    }();
+    if (!enabled) return false;
+    static strata::core::PerDeviceFlag<> gfx1151_dev;
+    int dev = 0;
+    if (cudaGetDevice(&dev) != cudaSuccess) {
+        (void) cudaGetLastError();
+        return false;
+    }
+    return gfx1151_dev.get(dev, [](int device) {
+        cudaDeviceProp prop{};
+        return cudaGetDeviceProperties(&prop, device) == cudaSuccess &&
+               strata::kernels::gfx_arch_is_gfx1151(prop.gcnArchName);
+    });
+}
+#endif
 
 // quantize one 32-block of one row to the planar activation layout (a warp: lane = element)
 __device__ __forceinline__ void quant_block(float v, int blk, int col, int K, int8_t* __restrict__ xq, float* __restrict__ xd) {
@@ -1799,7 +1911,14 @@ void df2_gemm(const Df2Mat* mats, int n, const void* xq, const float* xd, int n_
     const int8_t* xqp = static_cast<const int8_t*>(xq);
     cudaStream_t st = (cudaStream_t) stream;
     if (ncols > 8) {
-#if !defined(__HIPCC__)
+#if defined(__HIPCC__)
+        if (mats[0].q4 && g_gemm_variant == 0 && df2_batch_wmma_gfx1151_enabled()) {
+            const dim3 grid((unsigned) (rows / 16), (unsigned) ((ncols + kDf2BatchWmmaCols - 1) / kDf2BatchWmmaCols));
+            gemm4_batch_wmma_gfx1151_kernel<<<grid, 128, 0, st>>>(segs, xqp, xd, n_in, ncols);
+            check("gemm4_batch_wmma_gfx1151");
+            return;
+        }
+#else
         static const bool batch_tc_ok = [] {
             int dev = 0, major = 0;
             if (cudaGetDevice(&dev) != cudaSuccess ||

@@ -1,12 +1,15 @@
 // src/kernels/expdec_bench.cpp - the VRAM experts of a decode verify window: the default grouped kernels against
 // EXPDEC (STRATA_EXPDEC=1, docs/EXPERTDEC.md), bit for bit and in microseconds, per card, per T, per format pair.
 //
-//     build/expdec_bench [reps = 300] [device = -1 (all)] [groups = 20] [pairs = all] [choices = def,dec,dec:r2,dec:b4,dec:r2:b4] [shape = real]
+//     build/expdec_bench [reps = 300] [device = -1 (all)] [groups = 20] [pairs = all] [choices = def,dec,dec:r2,dec:b4,dec:r2:b4] [shape = real] [widths = 1,2,3,4] [launch = stream]
+// Widths of 1 to 8 are supported. Give one group target or one per width. `graph` captures 16 calls per graph,
+// with the verifier's T * top-k launch capacity even when some experts are shared across rows.
 //
 // The model's routed expert formats at its geometry (n_embd 2560, n_ff 640): gate/up IQ2_XXS (16), IQ2_XS (17), IQ3_XXS
 // (18), IQ3_S (21), IQ2_S (22); down IQ4_NL (20), Q2_0 (42).  `pairs` is a comma list of gu/down type ids ("21/20,16/42")
 // or "all" (the 10 pairs).  `choices` is a comma list of kernel choices:
 //   def                     the default kernels (STRATA_EXPDEC off); the reference for the bitwise check
+//   mode<N>[+dec...]       set STRATA_EXP_MODE explicitly for this choice; optionally combine it with EXPDEC
 //   dec[:r<n>][:d<n>][:b<n>][:w<n>][:x<n>][:g<n>][:h<n>][:m<n>]
 //                           EXPDEC with r = gate/up rows per lane (1, 2), d = down rows per lane (1, 2, 4), b = the
 //                           gate/up kernel's min blocks per SM (2 | 4), w = 1 EXPDEC for the down too (the engine's
@@ -34,6 +37,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <climits>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -48,7 +52,7 @@ namespace K = strata::kernels;
 
 namespace {
 
-constexpr int kEmbd = 2560, kFf = 640, kTop = 10, kMaxT = 4;
+constexpr int kEmbd = 2560, kFf = 640, kTop = 10, kMaxT = 8;
 constexpr int kMaxEntries = kMaxT * kTop;
 
 struct Pair { int gu, d; };
@@ -64,6 +68,7 @@ int qk_of(int t) { return t == 20 ? 32 : t == 42 ? 64 : 256; }
 
 struct Choice {
     std::string name;
+    int mode = -1;
     bool dec = false;
     K::NativeExpertExpdecParams p;   // only explicitly specified fields set; unspecified fields keep their sentinels
 };
@@ -82,10 +87,17 @@ K::NativeExpertExpdecParams resolve_choice_params(const K::NativeExpertExpdecPar
 }
 
 // "def" | "dec[:r<n>][:d<n>][:b<n>][:x<n>][:g<n>][:h<n>][:m<n>]"; false on anything else
-bool parse_choice(const std::string& s, Choice& c) {
+bool parse_choice(std::string s, Choice& c) {
     c = Choice{};
     c.name = s;
     if (s == "def") return true;
+    if (s.rfind("mode", 0) == 0) {
+        if (s.size() < 5 || std::strchr("01245678", s[4]) == nullptr) return false;
+        c.mode = s[4] - '0';
+        if (s.size() == 5) return true;
+        if (s[5] != '+') return false;
+        s.erase(0, 6);
+    }
     if (s.rfind("dec", 0) != 0) return false;
     c.dec = true;
     size_t i = 3;
@@ -222,37 +234,55 @@ struct StreamEvents {
     }
 };
 
+struct CapturedCalls {
+    cudaGraph_t graph = nullptr;
+    cudaGraphExec_t exec = nullptr;
+    ~CapturedCalls() {
+        if (exec) cudaGraphExecDestroy(exec);
+        if (graph) cudaGraphDestroy(graph);
+    }
+};
+
+struct WindowShape { int width, groups; };
+
 // (device, pair gu, pair d, T, shape, choice) -> {all, gu, down} us
 using Key = std::tuple<int, int, int, int, std::string, std::string>;
 std::map<Key, std::array<double, 3>> g_times;
 
-bool run_device(int dev, const K::NativeExpertExpdecParams& dev_params, int reps, int groups_req,
+bool run_device(int dev, const K::NativeExpertExpdecParams& dev_params, int reps, const std::vector<WindowShape>& windows,
                 const std::vector<uint8_t>& pool, size_t P, size_t stride, const std::vector<float>& xh,
                 const K::NativeExpertLayout& L, const Pair& pair, const std::vector<Choice>& choices,
-                const std::vector<std::string>& shapes, long long& bad) {
+                const std::vector<std::string>& shapes, bool graph, long long& bad) {
     if (!ck(cudaSetDevice(dev), "set device")) return false;
     cudaDeviceProp pr{};
     cudaGetDeviceProperties(&pr, dev);
-    std::printf("# device %d: %s (sm_%d%d, %d SMs, L2 %d KB), %d reps x 5 rounds, <= %d groups, pool %d blobs x %.2f MB\n", dev,
-                pr.name, pr.major, pr.minor, pr.multiProcessorCount, pr.l2CacheSize / 1024, reps, groups_req, (int) P,
+    char arch[64] = {};
+#if defined(STRATA_USE_HIP)
+    std::snprintf(arch, sizeof arch, "%s", pr.gcnArchName);
+#else
+    std::snprintf(arch, sizeof arch, "sm_%d%d", pr.major, pr.minor);
+#endif
+    std::printf("# device %d: %s (%s, %d compute units, L2 %d KB), %d reps x 5 rounds, %s, pool %d blobs x %.2f MB\n", dev,
+                pr.name, arch, pr.multiProcessorCount, pr.l2CacheSize / 1024, reps, graph ? "graphs" : "streams", (int) P,
                 (double) L.bytes / 1e6);
     int mclk_khz = 0, bus_bits = 0;
     cudaDeviceGetAttribute(&mclk_khz, cudaDevAttrMemoryClockRate, dev);
     cudaDeviceGetAttribute(&bus_bits, cudaDevAttrGlobalMemoryBusWidth, dev);
     const double peak = 2.0 * (double) mclk_khz * 1e3 * (double) bus_bits / 8.0;   // bytes / s
     std::printf("# device %d peak DRAM bandwidth %.1f GB/s (memory clock %d kHz, bus %d bit)\n", dev, peak / 1e9, mclk_khz, bus_bits);
-    const int gmax = kMaxEntries;
+    const int max_width = static_cast<int>(xh.size() / kEmbd);
+    const int gmax = max_width * kTop;
     DevMem mem;
     auto* dpool = (uint8_t*) mem.alloc(pool.size());
     auto* dx = (float*) mem.alloc(xh.size() * sizeof(float));
-    void* dxq = mem.alloc((size_t) kMaxT * kEmbd / 32 * 36);
-    void* dscr = mem.alloc(K::native_expert_scratch_bytes(kMaxEntries, kFf));
-    auto* dout = (float*) mem.alloc((size_t) kMaxEntries * kEmbd * sizeof(float));
+    void* dxq = mem.alloc((size_t) max_width * kEmbd / 32 * 36);
+    void* dscr = mem.alloc(K::native_expert_scratch_bytes(gmax, kFf));
+    auto* dout = (float*) mem.alloc((size_t) gmax * kEmbd * sizeof(float));
     auto* dptr = (unsigned long long*) mem.alloc(P * (size_t) gmax * sizeof(unsigned long long));
     auto* dstart = (int32_t*) mem.alloc((size_t) (gmax + 1) * sizeof(int32_t));
     auto* dn = (int32_t*) mem.alloc(sizeof(int32_t));
-    auto* ddst = (int32_t*) mem.alloc((size_t) kMaxEntries * sizeof(int32_t));
-    auto* dtok = (int32_t*) mem.alloc((size_t) kMaxEntries * sizeof(int32_t));
+    auto* ddst = (int32_t*) mem.alloc((size_t) gmax * sizeof(int32_t));
+    auto* dtok = (int32_t*) mem.alloc((size_t) gmax * sizeof(int32_t));
     if (!dpool || !dx || !dxq || !dscr || !dout || !dptr || !dstart || !dn || !ddst || !dtok) return false;
     StreamEvents se;
     if (!ck(cudaStreamCreate(&se.s), "stream") || !ck(cudaEventCreate(&se.a), "event") ||
@@ -262,16 +292,19 @@ bool run_device(int dev, const K::NativeExpertExpdecParams& dev_params, int reps
     if (!ck(cudaMemcpy(dpool, pool.data(), pool.size(), cudaMemcpyHostToDevice), "copy pool") ||
         !ck(cudaMemcpy(dx, xh.data(), xh.size() * sizeof(float), cudaMemcpyHostToDevice), "copy x"))
         return false;
-    K::quantize_q8_1_rows(dx, kMaxT, kEmbd, dxq, stream);
+    K::quantize_q8_1_rows(dx, max_width, kEmbd, dxq, stream);
     if (!ck(cudaStreamSynchronize(se.s), "quantize")) return false;
 
     std::mt19937 rng(20261012u);
     bool ok = true;
-    for (int T = 1; T <= kMaxT && ok; ++T) {
+    for (const WindowShape& window : windows) {
+        if (!ok) break;
+        const int T = window.width;
         for (const std::string& shape : shapes) {
             if (!ok) break;
-            const Window w = shape == "single" ? build_single(T) : build_real(T, groups_req, rng);
+            const Window w = shape == "single" ? build_single(T) : build_real(T, window.groups, rng);
             const int G = w.groups, NE = w.entries;
+            const int cap = graph ? T * kTop : G;
             // call i reads G experts starting at blob (i * G) % P: a fresh set until the pool wraps (>= 96 MB later)
             std::vector<unsigned long long> hp(P * (size_t) G);
             for (size_t i = 0; i < P; ++i)
@@ -283,33 +316,57 @@ bool run_device(int dev, const K::NativeExpertExpdecParams& dev_params, int reps
                  ck(cudaMemcpy(ddst, w.dst.data(), w.dst.size() * sizeof(int32_t), cudaMemcpyHostToDevice), "copy dst") &&
                  ck(cudaMemcpy(dtok, w.tok.data(), w.tok.size() * sizeof(int32_t), cudaMemcpyHostToDevice), "copy tok");
             if (!ok) break;
-            std::printf("# T=%d %s: %d groups, %d entries, %.1f MB of weights per call\n", T, shape.c_str(), G, NE,
+            std::printf("# T=%d %s: %d groups (cap %d), %d entries, %.1f MB of weights per call\n", T, shape.c_str(), G, cap, NE,
                         (double) G * (double) L.bytes / 1e6);
+            std::array<int, kMaxT + 1> group_sizes{};
+            for (int g = 0; g < G; ++g) ++group_sizes[(size_t) (w.start[g + 1] - w.start[g])];
+            std::printf("# groups by number of entries:");
+            for (int n = 1; n <= T; ++n) if (group_sizes[n] > 0) std::printf(" %d=%d", n, group_sizes[n]);
+            std::printf("\n");
             auto call = [&](size_t i) {
-                K::native_expert_grouped(L, dptr + (i % P) * (size_t) G, dstart, dn, ddst, dtok, G, NE, dxq, dscr, dout, stream, 0);
+                K::native_expert_grouped(L, dptr + (i % P) * (size_t) G, dstart, dn, ddst, dtok, cap, NE, dxq, dscr, dout, stream, 0);
             };
-            auto timed = [&](int phase, int rounds, double& out_us) {
-                K::native_expert_set_mode(-1, phase);
-                for (size_t i = 0; i < (phase == 0 ? 100u : 20u); ++i) call(i);
+            auto timed = [&](int mode, int phase, int rounds, double& out_us) {
+                K::native_expert_set_mode(mode, phase);
+                CapturedCalls captured;
+                constexpr int kCallsPerGraph = 16;
+                const int measured_calls = graph ? (reps + kCallsPerGraph - 1) / kCallsPerGraph * kCallsPerGraph : reps;
+                if (graph) {
+                    call(0);
+                    if (!ck(cudaStreamSynchronize(se.s), "warm-up") ||
+                        !ck(cudaStreamBeginCapture(se.s, cudaStreamCaptureModeThreadLocal), "begin capture")) return false;
+                    for (int i = 0; i < kCallsPerGraph; ++i) call((size_t) i);
+                    if (!ck(cudaStreamEndCapture(se.s, &captured.graph), "end capture") ||
+                        !ck(cudaGraphInstantiate(&captured.exec, captured.graph, nullptr, nullptr, 0), "instantiate graph") ||
+                        !ck(cudaGraphLaunch(captured.exec, se.s), "warm graph")) return false;
+                } else {
+                    for (size_t i = 0; i < (phase == 0 ? 100u : 20u); ++i) call(i);
+                }
                 std::vector<double> rs((size_t) rounds);
                 for (double& r : rs) {
                     cudaEventRecord(se.a, se.s);
-                    for (int i = 0; i < reps; ++i) call((size_t) i);
+                    if (graph) {
+                        for (int i = 0; i < measured_calls; i += kCallsPerGraph)
+                            if (!ck(cudaGraphLaunch(captured.exec, se.s), "launch graph")) return false;
+                    } else {
+                        for (int i = 0; i < measured_calls; ++i) call((size_t) i);
+                    }
                     cudaEventRecord(se.b, se.s);
                     cudaEventSynchronize(se.b);
                     float ms = 0.0f;
                     ok = ok && ck(cudaEventElapsedTime(&ms, se.a, se.b), "elapsed") && ck(cudaGetLastError(), "kernel");
-                    r = 1000.0 * (double) ms / reps;
+                    r = 1000.0 * (double) ms / measured_calls;
                 }
                 std::sort(rs.begin(), rs.end());
                 out_us = rs[(size_t) rounds / 2];
-                K::native_expert_set_mode(-1, 0);
+                K::native_expert_set_mode(mode, 0);
+                return ok;
             };
             std::vector<float> ref, res((size_t) NE * kEmbd);
             for (size_t vi = 0; vi < choices.size() && ok; ++vi) {
                 const Choice& c = choices[vi];
                 apply_choice(dev_params, c);
-                K::native_expert_set_mode(-1, 0);
+                K::native_expert_set_mode(c.mode, 0);
                 ok = ck(cudaMemset(dout, 0, (size_t) NE * kEmbd * sizeof(float)), "memset out");
                 call(0);
                 ok = ok && ck(cudaStreamSynchronize(se.s), "run") && ck(cudaGetLastError(), "kernel") &&
@@ -325,9 +382,8 @@ bool run_device(int dev, const K::NativeExpertExpdecParams& dev_params, int reps
                     same = std::memcmp(ref.data(), res.data(), ref.size() * sizeof(float)) == 0;
                 }
                 double us[3] = {0.0, 0.0, 0.0};
-                timed(0, 5, us[0]);
-                timed(1, 3, us[1]);
-                timed(2, 3, us[2]);
+                ok = timed(c.mode, 0, 5, us[0]) && timed(c.mode, 1, 3, us[1]) && timed(c.mode, 2, 3, us[2]);
+                if (!ok) break;
                 const double gbps = (double) G * (double) L.bytes / (us[0] * 1e-6) / 1e9;
                 std::printf("%d %d %s %d/%d %s %.1f %.1f %.1f %.1f %.1f%% %s\n", dev, T, shape.c_str(), L.gu_type, L.d_type,
                             c.name.c_str(), us[0], us[1], us[2], gbps, peak > 0.0 ? 100.0 * gbps * 1e9 / peak : 0.0,
@@ -375,13 +431,39 @@ std::vector<std::string> split_commas(const std::string& s) {
     return out;
 }
 
+bool parse_numbers(const char* text, int maximum, std::vector<int>& out) {
+    for (const std::string& item : split_commas(text)) {
+        char* end = nullptr;
+        const long n = std::strtol(item.c_str(), &end, 10);
+        if (*end != '\0' || n < 1 || n > maximum) return false;
+        out.push_back(static_cast<int>(n));
+    }
+    return !out.empty();
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     setvbuf(stdout, nullptr, _IONBF, 0);
     const int reps = argc > 1 ? std::max(20, std::atoi(argv[1])) : 300;
     const int only = argc > 2 ? std::atoi(argv[2]) : -1;
-    const int groups_req = argc > 3 ? std::min(kMaxEntries, std::max(kTop, std::atoi(argv[3]))) : 20;
+    std::vector<int> widths, groups;
+    if (!parse_numbers(argc > 7 ? argv[7] : "1,2,3,4", kMaxT, widths) ||
+        !parse_numbers(argc > 3 ? argv[3] : "20", INT_MAX, groups) ||
+        (groups.size() != 1 && groups.size() != widths.size())) {
+        std::fprintf(stderr, "expdec_bench: provide widths from 1 through 8 and one group target or one per width\n");
+        return 1;
+    }
+    std::vector<WindowShape> windows;
+    for (size_t i = 0; i < widths.size(); ++i)
+        windows.push_back({widths[i], std::clamp(groups[groups.size() == 1 ? 0 : i], kTop, kMaxEntries)});
+    const std::string launch = argc > 8 ? argv[8] : "stream";
+    if (launch != "stream" && launch != "graph") {
+        std::fprintf(stderr, "expdec_bench: launch must be stream or graph\n");
+        return 1;
+    }
+    const bool graph = launch == "graph";
+    const int max_width = *std::max_element(widths.begin(), widths.end());
     std::vector<Pair> pairs;
     if (argc > 4 && std::string(argv[4]) != "all") {
         if (!parse_pairs(argv[4], pairs)) {
@@ -395,12 +477,12 @@ int main(int argc, char** argv) {
     for (const std::string& s : split_commas(argc > 5 ? argv[5] : "def,dec,dec:r2,dec:b4,dec:r2:b4")) {
         Choice c;
         if (!parse_choice(s, c)) {
-            std::printf("expdec_bench: choice '%s' is not def or dec[:r<1|2>][:d<1|2|4>][:b<2|4>][:x<0|1>][:g<n>][:h<n>][:m<n>]\n", s.c_str());
+            std::printf("expdec_bench: choice '%s' is not def, mode<N>[+dec...] or dec[:r<1|2>][:d<1|2|4>][:b<2|4>][:x<0|1>][:g<n>][:h<n>][:m<n>]\n", s.c_str());
             return 1;
         }
         choices.push_back(c);
     }
-    if (choices.empty() || choices[0].dec) {
+    if (choices.empty() || choices[0].name != "def") {
         Choice d;
         parse_choice("def", d);
         choices.insert(choices.begin(), d);   // the reference first
@@ -463,22 +545,22 @@ int main(int argc, char** argv) {
         if (!ok) break;
         const K::NativeExpertLayout L = K::native_expert_layout(p.gu, p.d, kEmbd, kFf);
         const size_t stride = (L.bytes + 255) / 256 * 256;
-        const size_t P = std::max<size_t>((size_t) (96u << 20) / stride + 1, (size_t) 2 * (size_t) kMaxEntries);
+        const size_t P = std::max<size_t>((size_t) (96u << 20) / stride + 1, (size_t) 2 * max_width * kTop);
         std::printf("# pair %d/%d: gate/up %s, down %s: blob %.2f MB (gu_row %d, d_row %d), pool %.0f MB\n", p.gu, p.d,
                     type_name(p.gu), type_name(p.d), (double) L.bytes / 1e6, (int) L.gu_row, (int) L.d_row,
                     (double) (P * stride) / 1e6);
         std::mt19937 rng(77u + (unsigned) (p.gu * 131 + p.d));
         std::vector<uint8_t> pool(P * stride, 0);
         for (size_t i = 0; i < P; ++i) fill_blob(pool.data() + i * stride, L, rng);
-        std::vector<float> xh((size_t) kMaxT * kEmbd);
+        std::vector<float> xh((size_t) max_width * kEmbd);
         std::normal_distribution<float> nd(0.0f, 1.0f);
         for (float& v : xh) v = nd(rng);
         for (int dev = 0; dev < n_dev; ++dev) {
             if (only >= 0 && dev != only) continue;
-            ok = run_device(dev, dev_params[(size_t) dev], reps, groups_req, pool, P, stride, xh, L, p, choices, shapes, bad) && ok;
+            ok = run_device(dev, dev_params[(size_t) dev], reps, windows, pool, P, stride, xh, L, p, choices, shapes, graph, bad) && ok;
         }
     }
-    if (shapes.size() == 2 && groups_req == 20) {
+    if (shapes.size() == 2 && groups.size() == 1 && groups.front() == 20) {
         std::printf("\n# decomposition (us per layer call): a = per expert = (single T=4 - real T=2) / 20, b = per entry = (real T=4 - real T=2) / 20\n");
         std::printf("# dev gu/d choice a_all a_gu a_down b_all b_gu b_down\n");
         for (int dev = 0; dev < n_dev; ++dev) {

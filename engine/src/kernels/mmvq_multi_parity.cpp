@@ -83,7 +83,16 @@ bool ck(cudaError_t e, const char* what) {
 
 // Returns the number of outputs that differ bit for bit; counts the non-finite outputs and the differences on
 // outputs that are finite in both paths.
-long long compare(const Case& c, int T, cudaStream_t s, long long& nonfinite, long long& diff_finite, bool& ran) {
+bool enable_q2_warp(const char* value) {
+#if defined(_WIN32)
+    return _putenv_s("STRATA_HIP_Q2_WARP", value) == 0;
+#else
+    return setenv("STRATA_HIP_Q2_WARP", value, 1) == 0;
+#endif
+}
+
+long long compare(const Case& c, int T, cudaStream_t s, long long& nonfinite, long long& diff_finite, bool& ran,
+                  bool q2_warp = false) {
     ran = false;
     if (!strata::kernels::native_mmvq_supported(c.type)) return -1;
 
@@ -134,10 +143,17 @@ long long compare(const Case& c, int T, cudaStream_t s, long long& nonfinite, lo
     if (!ck(cudaStreamSynchronize(s), "quantize")) return -1;
 
     try {
+        if (q2_warp && !enable_q2_warp("0")) return -1;
         strata::kernels::native_mmvq(c.type, dw, xq, dmulti, c.n_in, c.n_out, T, s);
-        for (int j = 0; j < T; ++j)
-            strata::kernels::native_mmvq(c.type, dw, (const uint8_t*) xq + (std::size_t) j * qcol,
-                                         dsingle + (std::size_t) j * c.n_out, c.n_in, c.n_out, 1, s);
+        if (q2_warp) {
+            if (!enable_q2_warp("1")) return -1;
+            strata::kernels::native_mmvq(c.type, dw, xq, dsingle, c.n_in, c.n_out, T, s);
+            if (!enable_q2_warp("0")) return -1;
+        } else {
+            for (int j = 0; j < T; ++j)
+                strata::kernels::native_mmvq(c.type, dw, (const uint8_t*) xq + (std::size_t) j * qcol,
+                                             dsingle + (std::size_t) j * c.n_out, c.n_in, c.n_out, 1, s);
+        }
     } catch (const std::exception& e) {
         std::printf("%-12s T=%d: %s\n", c.name, T, e.what());
         return -1;
@@ -208,9 +224,44 @@ int sweep(bool exact, cudaStream_t s, Totals& t) {
     return bad;
 }
 
+int q2_warp_parity() {
+#if defined(STRATA_USE_HIP)
+    int device = 0;
+    cudaDeviceProp prop{};
+    if (cudaGetDevice(&device) != cudaSuccess || cudaGetDeviceProperties(&prop, device) != cudaSuccess ||
+        prop.warpSize != 32 || std::strncmp(prop.gcnArchName, "gfx1151", 7) != 0) {
+        std::puts("SKIP: Q2_0 warp rows require a wave32 gfx1151 device.");
+        return 77;
+    }
+    cudaStream_t stream;
+    if (!ck(cudaStreamCreate(&stream), "stream create")) return 1;
+    int failed = 0;
+    // All dense Q2_0 output sizes used by the ISTA-DASLab pack at a 2560-wide input,
+    // plus a partial last block to test the bounded row stores.
+    constexpr int rows[] = {640, 6144, 10240, 12288, 643};
+    for (int n_out : rows) {
+        const Case q2{"Q2_0 warp", 42, 2560, n_out, 64, 18, {0, -1}};
+        for (int ncols = 1; ncols <= 4; ++ncols) {
+            long long nonfinite = 0, diff_finite = 0;
+            bool ran = false;
+            const long long diff = compare(q2, ncols, stream, nonfinite, diff_finite, ran, true);
+            std::printf("Q2_0 %d x %d, %d columns: %lld bitwise differences, %lld non-finite%s\n",
+                        q2.n_in, n_out, ncols, diff, nonfinite, ran ? "" : " (not run)");
+            failed += !ran || diff != 0 || nonfinite != 0;
+        }
+    }
+    cudaStreamDestroy(stream);
+    return failed ? 1 : 0;
+#else
+    std::puts("SKIP: Q2_0 warp-row HIP parity requires a HIP build.");
+    return 77;
+#endif
+}
+
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc == 2 && std::strcmp(argv[1], "--q2-warp") == 0) return q2_warp_parity();
     cudaStream_t s;
     if (!ck(cudaStreamCreate(&s), "stream create")) return 1;
 

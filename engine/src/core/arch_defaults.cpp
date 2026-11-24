@@ -210,6 +210,16 @@ std::vector<std::pair<std::string, std::string>> igpu_default_env(const char* gc
             {"STRATA_PF_P1A_L2", "1"},
             {"STRATA_DFLASH_WMMA", "1"},
             {"STRATA_HIP_FAST_DEC", "1"},
+#if defined(STRATA_RYZEN_PROFILE)
+            // The fork's Q2_0 prompt experts and the Q4_0 drafter on Windows gfx1151.
+            {"STRATA_RYZEN_Q2_WMMA", "1"},
+            {"STRATA_DF2_BATCH_WMMA", "1"},
+            {"STRATA_DF2_GEMM4", "31"},
+            {"STRATA_HIP_Q2_WARP", "1"},
+            {"STRATA_RYZEN_Q5_HEAD", "1"},
+            {"STRATA_RYZEN_Q3_WAVE", "1"},
+            {"STRATA_DF2_PLE_PREFETCH", "1"},
+#endif
         };
     }
     return t;

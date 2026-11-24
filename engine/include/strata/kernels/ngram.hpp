@@ -127,6 +127,13 @@ uint64_t ngram_mixed(const int64_t* ctx, const uint64_t* mult, int n);
 /// heads (0..7) and the trigram heads (8..15) agree about the recent history.
 void ngram_rows(const int32_t* tokens, const int32_t* prev, int n_tokens, const PleConsts& c, uint32_t* out);
 
+/// Compute this token's keys and keep its predecessors in oldest-first order.
+inline void ngram_rows_advance(int32_t token, int32_t (&prev)[2], const PleConsts& c, uint32_t* out) {
+    ngram_rows(&token, prev, 1, c, out);
+    prev[0] = prev[1];
+    prev[1] = token;
+}
+
 /// The IQ4_NL codebook: `{-127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113}`,
 /// which is `kvalues_iq4nl` from `ggml-common.h` L1121 and also the manifest's `codebooks.IQ4NL`.
 ///

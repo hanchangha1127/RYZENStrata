@@ -3,7 +3,7 @@
 //
 // src/kernels/cuda/rdna_mmvq.cu - RDNA3/RDNA3.5 (gfx1100..gfx1151) Wave32 multi-column decode GEMV & T=8..16 WMMA verify:
 //   - rdna_q6k_kernel<NC>: Q6_K x q8_1 decode GEMV (one Wave32 per row, DPP reduction, NC=1..8, sliced for 9..16)
-//   - rdna_kq_kernel<FMT, NC>: Q4_K (12), Q5_K (13), IQ4_XS (23), IQ3_S (21) using strata-quant-common.h iq3s_grid
+//   - rdna_kq_kernel<FMT, NC>: Q3_K (11, opt-in), Q4_K (12), Q5_K (13), IQ4_XS (23), IQ3_S (21)
 //   - rdna_q80_wmma_t8_kernel: T=8..16 Q8_0 x q8_1 direct Wave32 INT8 WMMA (__builtin_amdgcn_wmma_i32_16x16x16_iu8_w32)
 // Enabled via STRATA_RDNA_Q6K=1 or STRATA_HIP_FAST_DEC=1 on gfx1100..gfx1151 (zero rocWMMA dependency).
 #include "strata/kernels/gfx_arch.hpp"
@@ -62,6 +62,20 @@ __device__ __forceinline__ float wsum32(float v) {
 
 __device__ __forceinline__ uint32_t ld32u(const uint8_t* p) {
     return *reinterpret_cast<const uint32_t*>(p);
+}
+
+// An odd Q3_K block starts only two-byte aligned.
+__device__ __forceinline__ uint32_t q3_load32(const uint8_t* p) {
+    const auto* words = reinterpret_cast<const uint16_t*>(p);
+    return (uint32_t) words[0] | ((uint32_t) words[1] << 16);
+}
+
+__device__ __forceinline__ int q3_weight4(const uint8_t* block, int group, int column) {
+    const int shift = 2 * (group % 4);
+    const uint32_t lo = (q3_load32(block + 32 + 32 * (group / 4) + column) >> shift) & 0x03030303u;
+    const uint32_t negative = (~q3_load32(block + column) >> group) & 0x01010101u;
+    // A cleared high bit subtracts four. Set the top six bits of that byte.
+    return (int) (lo | (negative * 0xfcu));
 }
 
 __device__ __forceinline__ int dot4_s8(int w, int a, int acc) {
@@ -152,18 +166,19 @@ __device__ __forceinline__ int neg_by_signbits4(uint32_t g, uint32_t mask4) {
 }
 
 template <int FMT> struct KFmt;
+template <> struct KFmt<11> { static constexpr int B = 110; };
 template <> struct KFmt<12> { static constexpr int B = 144; };
 template <> struct KFmt<13> { static constexpr int B = 176; };
 template <> struct KFmt<23> { static constexpr int B = 136; };
 template <> struct KFmt<21> { static constexpr int B = 110; };
 
-template <int FMT, int NC, int UNR = (FMT == 21 ? 2 : (NC <= 2 ? 5 : NC <= 4 ? 3 : 2))>
-__global__ void __launch_bounds__(256) rdna_kq_kernel(const uint8_t* __restrict__ w, const Q81* __restrict__ x,
+template <int FMT, int NC, int WAVES = 8, int FIXED_K = 0, int UNR = (FMT == 21 ? 2 : (NC <= 2 ? 5 : NC <= 4 ? 3 : 2))>
+__global__ void __launch_bounds__(WAVES * 32) rdna_kq_kernel(const uint8_t* __restrict__ w, const Q81* __restrict__ x,
                                                       float* __restrict__ y, int n_in, int n_out,
                                                       const uint8_t* __restrict__ w2, float* __restrict__ y2, int n_out2) {
     constexpr int BB_ = KFmt<FMT>::B;
     const int lane = threadIdx.x & 31;
-    int row = blockIdx.x * 8 + (threadIdx.x >> 5);
+    int row = blockIdx.x * WAVES + (threadIdx.x >> 5);
     __shared__ uint32_t s_grid[FMT == 21 ? 512 : 1];
     if constexpr (FMT == 21) {
         for (int i = threadIdx.x; i < 512; i += blockDim.x) s_grid[i] = iq3s_grid[i];
@@ -176,7 +191,8 @@ __global__ void __launch_bounds__(256) rdna_kq_kernel(const uint8_t* __restrict_
         n_out = n_out2;
     }
     if (row >= n_out) return;
-    const int nsb = n_in / QK, xs = n_in / 32;
+    const int width = FIXED_K ? FIXED_K : n_in;
+    const int nsb = width / QK, xs = width / 32;
     const int j = lane >> 2, l0 = (lane & 3) * 8;
     float acc[NC];
 #pragma unroll
@@ -187,7 +203,14 @@ __global__ void __launch_bounds__(256) rdna_kq_kernel(const uint8_t* __restrict_
         const uint8_t* b = wr + (size_t) sb * BB_;
         int w0, w1;
         float f1, f2 = 0.0f;
-        if constexpr (FMT == 21) {
+        if constexpr (FMT == 11) {
+            w0 = q3_weight4(b, j, l0);
+            w1 = q3_weight4(b, j, l0 + 4);
+            const int si = 2 * j + l0 / 16;
+            const int slo = (b[96 + si % 8] >> (4 * (si / 8))) & 15;
+            const int shi = (b[104 + si % 4] >> (2 * (si / 4))) & 3;
+            f1 = __half2float(*reinterpret_cast<const half*>(b + 108)) * (float) ((slo | (shi << 4)) - 32);
+        } else if constexpr (FMT == 21) {
             const int l = lane & 3;
             const uint8_t* qs = b + 2 + 8 * j + 2 * l;
             const int qh = b[66 + j];
@@ -233,7 +256,7 @@ __global__ void __launch_bounds__(256) rdna_kq_kernel(const uint8_t* __restrict_
             const int* q = reinterpret_cast<const int*>(xb8->qs) + (l0 >> 2);
             const float d8 = __low2float(xb8->ds);
             const int s1 = dot2(w0, w1, q, 0);
-            if constexpr (FMT == 23 || FMT == 21) {
+            if constexpr (FMT == 11 || FMT == 23 || FMT == 21) {
                 acc[c] = fmaf(d8 * f1, (float) s1, acc[c]);
             } else {
                 const int s2 = dot2(0x01010101, 0x01010101, q, 0);
@@ -248,19 +271,19 @@ __global__ void __launch_bounds__(256) rdna_kq_kernel(const uint8_t* __restrict_
     }
 }
 
-template <int FMT>
+template <int FMT, int WAVES = 8, int FIXED_K = 0>
 void kq_launch_slice(const uint8_t* wb, const Q81* x, float* y, int n_in, int n_out, int ncols, cudaStream_t s,
                      const uint8_t* w2, float* y2, int n_out2) {
-    const unsigned blocks = (unsigned) ((n_out + 7) / 8 + (w2 ? (n_out2 + 7) / 8 : 0));
+    const unsigned blocks = (unsigned) ((n_out + WAVES - 1) / WAVES + (w2 ? (n_out2 + WAVES - 1) / WAVES : 0));
     switch (ncols) {
-        case 1: rdna_kq_kernel<FMT, 1><<<blocks, 256, 0, s>>>(wb, x, y, n_in, n_out, w2, y2, n_out2); break;
-        case 2: rdna_kq_kernel<FMT, 2><<<blocks, 256, 0, s>>>(wb, x, y, n_in, n_out, w2, y2, n_out2); break;
-        case 3: rdna_kq_kernel<FMT, 3><<<blocks, 256, 0, s>>>(wb, x, y, n_in, n_out, w2, y2, n_out2); break;
-        case 4: rdna_kq_kernel<FMT, 4><<<blocks, 256, 0, s>>>(wb, x, y, n_in, n_out, w2, y2, n_out2); break;
-        case 5: rdna_kq_kernel<FMT, 5><<<blocks, 256, 0, s>>>(wb, x, y, n_in, n_out, w2, y2, n_out2); break;
-        case 6: rdna_kq_kernel<FMT, 6><<<blocks, 256, 0, s>>>(wb, x, y, n_in, n_out, w2, y2, n_out2); break;
-        case 7: rdna_kq_kernel<FMT, 7><<<blocks, 256, 0, s>>>(wb, x, y, n_in, n_out, w2, y2, n_out2); break;
-        default: rdna_kq_kernel<FMT, 8><<<blocks, 256, 0, s>>>(wb, x, y, n_in, n_out, w2, y2, n_out2); break;
+        case 1: rdna_kq_kernel<FMT, 1, WAVES, FIXED_K><<<blocks, WAVES * 32, 0, s>>>(wb, x, y, n_in, n_out, w2, y2, n_out2); break;
+        case 2: rdna_kq_kernel<FMT, 2, WAVES, FIXED_K><<<blocks, WAVES * 32, 0, s>>>(wb, x, y, n_in, n_out, w2, y2, n_out2); break;
+        case 3: rdna_kq_kernel<FMT, 3, WAVES, FIXED_K><<<blocks, WAVES * 32, 0, s>>>(wb, x, y, n_in, n_out, w2, y2, n_out2); break;
+        case 4: rdna_kq_kernel<FMT, 4, WAVES, FIXED_K><<<blocks, WAVES * 32, 0, s>>>(wb, x, y, n_in, n_out, w2, y2, n_out2); break;
+        case 5: rdna_kq_kernel<FMT, 5, WAVES, FIXED_K><<<blocks, WAVES * 32, 0, s>>>(wb, x, y, n_in, n_out, w2, y2, n_out2); break;
+        case 6: rdna_kq_kernel<FMT, 6, WAVES, FIXED_K><<<blocks, WAVES * 32, 0, s>>>(wb, x, y, n_in, n_out, w2, y2, n_out2); break;
+        case 7: rdna_kq_kernel<FMT, 7, WAVES, FIXED_K><<<blocks, WAVES * 32, 0, s>>>(wb, x, y, n_in, n_out, w2, y2, n_out2); break;
+        default: rdna_kq_kernel<FMT, 8, WAVES, FIXED_K><<<blocks, WAVES * 32, 0, s>>>(wb, x, y, n_in, n_out, w2, y2, n_out2); break;
     }
 }
 
@@ -361,6 +384,22 @@ bool arch_is_rdna3_or_4() {
     return ok[dev] == 2;
 }
 
+bool q3_wave32_enabled() {
+    const char* option = std::getenv("STRATA_RYZEN_Q3_WAVE");
+    if (!option || option[0] != '1' || option[1] != '\0') return false;
+    int dev = 0;
+    if (cudaGetDevice(&dev) != cudaSuccess) return false;
+    static thread_local int last_device = -1;
+    static thread_local bool supported = false;
+    if (last_device != dev) {
+        cudaDeviceProp prop{};
+        supported = cudaGetDeviceProperties(&prop, dev) == cudaSuccess &&
+                    prop.warpSize == 32 && gfx_arch_is_gfx1151(prop.gcnArchName);
+        last_device = dev;
+    }
+    return supported;
+}
+
 bool arch_is_gfx11_wmma() {
     static int ok[64] = {};
     int dev = 0;
@@ -390,7 +429,10 @@ bool rdna_kq_mmvq(int type, const void* w, const void* xq, float* y, int n_in, i
 
 bool rdna_kq_mmvq2(int type, const void* w, const void* xq, float* y, int n_in, int n_out, int ncols, void* stream,
                    const void* w2v, float* y2, int n_out2) {
-    if (!rdna_q6k_enabled() || n_in % QK != 0 || ncols < 1 || ncols > 16) return false;
+    if (n_in % QK != 0 || ncols < 1 || ncols > 16) return false;
+    if (type == 11) {
+        if (ncols > 8 || w2v != nullptr || !q3_wave32_enabled()) return false;
+    } else if (!rdna_q6k_enabled()) return false;
     if (w2v != nullptr && n_out % 8 != 0) return false;
     const auto* wb = static_cast<const uint8_t*>(w);
     const auto* w2 = static_cast<const uint8_t*>(w2v);
@@ -403,11 +445,21 @@ bool rdna_kq_mmvq2(int type, const void* w, const void* xq, float* y, int n_in, 
         float* yc = y + (size_t) c0 * n_out;
         float* y2c = y2 ? (y2 + (size_t) c0 * n_out2) : nullptr;
         switch (type) {
+            case 11:
+                kq_launch_slice<11>(wb, xc, yc, n_in, n_out, nc, s, nullptr, nullptr, 0);
+                break;
             case 12:
                 if (ncols < 4 && std::getenv("STRATA_RDNA_KQ_ALL") == nullptr) return false;
                 kq_launch_slice<12>(wb, xc, yc, n_in, n_out, nc, s, w2, y2c, n_out2);
                 break;
             case 13:
+                if (n_in == 2560 && n_out >= 65536 && ncols <= 4 && !w2 && arch_is_gfx11_wmma()) {
+                    const char* option = std::getenv("STRATA_RYZEN_Q5_HEAD");
+                    if (option && std::strcmp(option, "1") == 0) {
+                        kq_launch_slice<13, 4, 2560>(wb, xc, yc, n_in, n_out, nc, s, nullptr, nullptr, 0);
+                        break;
+                    }
+                }
                 if (ncols < 4 && std::getenv("STRATA_RDNA_KQ_ALL") == nullptr) return false;
                 kq_launch_slice<13>(wb, xc, yc, n_in, n_out, nc, s, w2, y2c, n_out2);
                 break;

@@ -24,8 +24,10 @@
 #include "strata/core/expert_cache.hpp"
 #include "strata/core/pinned.hpp"
 #include "strata/core/exchange_storage.hpp"
+#include "strata/core/geometry.hpp"
 #include "strata/core/hit_hook.hpp"
 #include "strata/kernels/cpu/pool.hpp"
+#include "strata/kernels/window_limits.hpp"
 
 #include <algorithm>
 #include <array>
@@ -386,6 +388,18 @@ private:
     uint64_t st_vhit_[3] = {0, 0, 0}, st_vpred_[3] = {0, 0, 0}, st_pch_ = 0, st_pcov_[3] = {0, 0, 0};
     static constexpr int kVoteN = 16;
 };
+
+inline constexpr int kGpuOnlyVerifyMaxRows = strata::kernels::kVerifyNarrowT;
+
+constexpr int gpu_only_staging_blobs(int rows) {
+    // A window may share staging between two groups of unequal size. Give
+    // each half enough room for the larger group even when every route misses.
+    constexpr int experts_per_row = static_cast<int>(kCompiledGeometry.n_expert_used);
+    const int full_group_capacity = 2 * ((rows + 1) / 2) * experts_per_row;
+    return std::max(64, full_group_capacity);
+}
+
+inline constexpr int kMaxExpertFetches = gpu_only_staging_blobs(kGpuOnlyVerifyMaxRows);
 
 /// Plan v0.3 P6: what the GPU computes in a verify window's layer, written by the pool (mapped host memory) right
 /// after the ring and published before the CPU starts its own share.  Groups of entries that share a blob; the

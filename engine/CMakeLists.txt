@@ -714,6 +714,11 @@ target_link_libraries(strata_plan INTERFACE strata_warnings)
 add_executable(strata-plan src/plan/plan_main.cpp)
 target_link_libraries(strata-plan PRIVATE strata_plan)
 
+# Host-side draft selection and verification policy used by the HIP engine and host tests.
+add_library(strata_spec STATIC src/spec/suffix_drafter.cpp src/spec/controller.cpp src/spec/draft_policy.cpp
+            src/spec/draft_source.cpp)
+target_include_directories(strata_spec PUBLIC include)
+
 # ---- strata_core (GPU runtime) ---------------------------------------------
 # Only built when a GPU backend is on, so the Phase 1 targets keep working without a toolkit.
 strata_gpu_engine()

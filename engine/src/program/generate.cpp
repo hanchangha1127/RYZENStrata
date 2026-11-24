@@ -226,6 +226,7 @@ bool draft_vocab_whole_head();       // STRATA_METAL_DRAFT_VOCAB=full
 #include <charconv>
 #include <cmath>
 #include <limits>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -1214,7 +1215,7 @@ struct Options {
 
 void usage() {
 #if defined(STRATA_RYZEN_PROFILE)
-    std::fprintf(stderr, "  --gpu-experts-only   run the Ryzen GPU-only profile (enabled by default)\n");
+    std::fprintf(stderr, "  --gpu-experts-only   run the RYZENStrata HIP profile v2 (enabled by default)\n");
 #endif
     std::fprintf(stderr,
                  "strata generate --pack DIR --tokens \"1,2,3\" [options]\n"
@@ -4324,8 +4325,9 @@ int main(int argc, char** argv) {
         if (o.no_pool || o.no_capture || o.graph_only || o.gpu_only_full || o.gpu_stages || o.no_fast_select ||
             o.native_flash_attn_short || o.cpu_oracle_q8_0 || o.pool_measure || o.prefill_chunk <= 0 ||
             o.peer_device >= 0 || remote || !o.layer_split.empty() || o.batch > 0 || o.pipeline_windows > 0 ||
-            o.spec_split || o.spec < 2 || o.spec > 6) {
-            std::fprintf(stderr, "RYZENStrata requires a single GPU and the regular GPU prompt and verify paths (2 to 6 verify rows)\n");
+            o.spec_split || o.spec < 2 || o.spec > strata::core::kGpuOnlyVerifyMaxRows) {
+            std::fprintf(stderr, "RYZENStrata requires a single GPU and the regular GPU prompt and verify paths (2 to %d verify rows)\n",
+                         strata::core::kGpuOnlyVerifyMaxRows);
             return 2;
         }
         if (o.draft_auto || o.draft_fallback == "mtp" || (!o.mtp.empty() && o.draft != "dflash2") || o.draft == "mtp") {
@@ -4457,7 +4459,14 @@ int main(int argc, char** argv) {
                     // 1,307.9 tok/s and 64K 1,191.0 -> 1,238.2 (+3.8% / +4.0%); at 4K and 8K the chunk is the prompt, so
                     // nothing changes there.  The buffers' reserve grows to ~10.9 GiB and the cache keeps all 24,576 slots
                     // (the box reports 84.7 GiB free at a 64K context).  STRATA_GFX1151_CHUNK=0 keeps 6,144.
-                    o.prefill_chunk = std::max<int64_t>(o.prefill_chunk, 16384);
+                    int64_t max_chunk = 16384;
+#if defined(STRATA_RYZEN_PROFILE) && defined(_WIN32)
+                    // Leave room for the verifier's pinned buffers on 64 GiB UMA systems.
+                    ULONGLONG installed_kib = 0;
+                    if (GetPhysicallyInstalledSystemMemory(&installed_kib) && installed_kib <= (64ull << 20))
+                        max_chunk = 8192;
+#endif
+                    o.prefill_chunk = std::max(o.prefill_chunk, max_chunk);
                 }
             }
             // 0.2.8: the Strix Halo prompt path keeps its own buffers instead of lending cache slots.  A lent slot's expert
@@ -5548,8 +5557,10 @@ int main(int argc, char** argv) {
     {
         cudaDeviceProp prop{};
         const std::string cpu = strata::kernels::cpu::cpu_name();
-        if (cpu.find("Ryzen AI Max+") == std::string::npos ||
-            (cpu.find(" 395") == std::string::npos && cpu.find(" 495") == std::string::npos)) {
+        std::string sku = cpu + " ";
+        std::transform(sku.begin(), sku.end(), sku.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (sku.find("ryzen ai max+ 395 ") == std::string::npos && sku.find("ryzen ai max+ pro 395 ") == std::string::npos &&
+            sku.find("ryzen ai max+ 495 ") == std::string::npos && sku.find("ryzen ai max+ pro 495 ") == std::string::npos) {
             std::fprintf(stderr, "RYZENStrata requires a Ryzen AI Max+ 395 or Ryzen AI Max+ PRO 495 (%s)\n", cpu.c_str());
             return 2;
         }
@@ -21925,6 +21936,7 @@ int main(int argc, char** argv) {
             double dt_adapt_wait = 0, dt_adapt_join = 0;   // the tier's wait before a window / join after the draft (ms, summed)
             const int64_t dt_sw0 = ajob ? a_swapped : adapt_nswaps;
             int64_t dec_windows = 0, dec_T = 0;
+            int64_t df2_ple_scheduled = 0, df2_ple_legacy = 0, df2_ple_overlapped = 0;
             const int64_t decode_hits0 = drive.d.cache_hits;
             // CS-T: the RAM and file tiers of this request (the mmap source; 0 with the arena)
             const int64_t ram0 = src.ram_reads(), files0 = src.file_reads();
@@ -22750,6 +22762,20 @@ int main(int argc, char** argv) {
                     std::fprintf(stderr, "strata pipeline gate table (on-path share by p_on decile, then lookups):%s\n", cal.c_str());
                 }
             }
+            auto verify_window_rule = [&](bool initial) {
+                strata::spec::WindowRuleIn wr;
+                wr.use_mtp = use_mtp; wr.draft_on = draft_on; wr.df2_active = req_df2; wr.spec_cost = spec_cost; wr.first_window = initial;
+                wr.chain_rows = chain_rows; wr.cap = S_mtp; wr.start = draft_on ? S_mtp : 1; wr.spec_min_p = req_spec_min_p;
+                wr.draft_conf = o.draft_conf; wr.dprob = dprob.data();
+                return wr;
+            };
+            static const bool df2_ple_prefetch_opt = [] {
+                const char* e = std::getenv("STRATA_DF2_PLE_PREFETCH");
+                return e && e[0] == '1' && e[1] == '\0';
+            }();
+            const bool df2_ple_overlap = df2_ple_prefetch_opt && o.gpu_experts_only && o.ple_io == "direct" &&
+                                         !gated_proposal && !dc_learning && o.suffix_draft == 0 && o.lookup_chain == 0;
+
 #if defined(STRATA_HAVE_DFLASH2)
 #if defined(STRATA_GPU_METAL)
             const int df2_skip_min = strata::spec::df2_lookup_skip_min(8);
@@ -22773,22 +22799,55 @@ int main(int argc, char** argv) {
                 int32_t dd[strata::core::Dflash2Drafter::kDrafts];
                 float pp[strata::core::Dflash2Drafter::kDrafts];
                 const float* tp = df2_win_taps(a_ + 1, err);
-                if (tp == nullptr || !df2.draft(tp, a_ + 1, p, outv[(size_t) a_], dd, pp, err)) return false;
-                for (size_t i = 0; i < drafts.size() && i < (size_t) strata::core::Dflash2Drafter::kDrafts; ++i) { drafts[i] = dd[i]; dprob[i] = pp[i]; }
-                if (ss.ple.ready() && ss.ple.table != nullptr) {   // the PLE rows of the next window's tokens, read ahead (as the MTP's draft does)
-                    int n_pf = 0;
-                    const int cap = std::min<int>(S_mtp, (int) drafts.size() + 1);
-                    for (int t = 1; t < cap && (req_spec_min_p <= 0.0 || dprob[(size_t) t - 1] >= (float) req_spec_min_p); ++t) ++n_pf;
-                    int32_t prev[2] = {ss.ple_prev[0], ss.ple_prev[1]};
-                    auto pf = [&](int32_t tok) {
-                        uint32_t rows16[strata::kernels::PLE_N_HEADS];
-                        strata::kernels::ngram_rows(&tok, prev, 1, ss.ple.consts, rows16);
-                        prev[0] = prev[1];
-                        prev[1] = tok;
-                        ss.ple.table->prefetch_rows(rows16);
-                    };
-                    pf(outv[(size_t) a_]);
-                    for (int i = 0; i < n_pf; ++i) pf(drafts[(size_t) i]);
+                if (tp == nullptr) return false;
+                const int32_t anchor = outv[(size_t) a_];
+                const bool ple = ss.ple.ready() && ss.ple.table != nullptr;
+                const bool overlap = df2_ple_overlap && ple;
+                const int64_t next_room = o.max_context - (p + a_ + 1);
+                // commit() has advanced the session's predecessor pair. An
+                // early anchor must advance only this local copy.
+                int32_t prev[2] = {ss.ple_prev[0], ss.ple_prev[1]};
+                auto pf = [&](int32_t tok) {
+                    uint32_t rows16[strata::kernels::PLE_N_HEADS];
+                    strata::kernels::ngram_rows_advance(tok, prev, ss.ple.consts, rows16);
+                    ss.ple.table->prefetch_rows(rows16);
+                };
+                bool early_anchor = false;
+                if (overlap) {
+                    if (!df2.draft_launch(tp, a_ + 1, p, anchor, err)) return false;
+                    // Near the context limit we need the selected width first:
+                    // the verifier skips the whole window if it would not fit.
+                    if (next_room >= S_mtp && !stop_req.load()) {
+                        pf(anchor);
+                        early_anchor = true;
+                    }
+                    if (!df2.draft_finish(dd, pp, err)) {
+                        if (early_anchor) ss.ple.table->wait_prefetches();
+                        return false;
+                    }
+                } else if (!df2.draft(tp, a_ + 1, p, anchor, dd, pp, err)) return false;
+                for (size_t i = 0; i < drafts.size() && i < (size_t) strata::core::Dflash2Drafter::kDrafts; ++i) {
+                    drafts[i] = dd[i];
+                    dprob[i] = pp[i];
+                }
+                if (!ple) return true;
+                int legacy_rows = 1;
+                const int cap = std::min<int>(S_mtp, (int) drafts.size() + 1);
+                while (legacy_rows < cap && (req_spec_min_p <= 0.0 || dprob[(size_t) legacy_rows - 1] >= (float) req_spec_min_p))
+                    ++legacy_rows;
+                if (overlap && stop_req.load()) {
+                    if (early_anchor) ss.ple.table->wait_prefetches();
+                    return true;
+                }
+                const int rows = overlap ? strata::spec::prefetch_window_rows(verify_window_rule(false), next_room) : legacy_rows;
+                if (rows > 0) {
+                    if (!early_anchor) pf(anchor);
+                    for (int i = 0; i < rows - 1; ++i) pf(drafts[(size_t) i]);
+                }
+                if (dec_timing && overlap) {
+                    df2_ple_scheduled += rows;
+                    df2_ple_legacy += legacy_rows;
+                    df2_ple_overlapped += early_anchor ? 1 : 0;
                 }
                 return true;
             };
@@ -22833,15 +22892,7 @@ int main(int argc, char** argv) {
                     T = proposal.T; from_sfx = proposal.from_sfx;
                     if (first_window && merge_T > 0) T = merge_T;   // STRATA_ADMIT_MERGE_FIRST: the prompt's last tokens ride in this window
                 } else {
-                    T = draft_on ? S_mtp : 1;   // no drafter: one token a round unless a lookup draft fires
-                    {   // the window rule of this request's ACTIVE source (spec/window_rule.hpp), as in the CLI loop: the MTP chain's cost rule
-                        // and probabilities do not govern DFlash2's candidates, though the MTP may stay loaded beside it
-                        strata::spec::WindowRuleIn wr;
-                        wr.use_mtp = use_mtp; wr.draft_on = draft_on; wr.df2_active = req_df2; wr.spec_cost = spec_cost; wr.first_window = first_window;
-                        wr.chain_rows = chain_rows; wr.cap = S_mtp; wr.start = T; wr.spec_min_p = req_spec_min_p;
-                        wr.draft_conf = o.draft_conf; wr.dprob = dprob.data();
-                        T = strata::spec::choose_window(wr);
-                    }
+                    T = strata::spec::choose_window(verify_window_rule(first_window));
                     if (first_window) T = merge_T > 0 ? merge_T : 1;
                     // a repeat of earlier context (prompt lookup) where the MTP's own first guess agrees: the policy takes it
                     // when its expected tokens per ms, from the measured acceptance and window costs, beat the MTP window's
@@ -23484,6 +23535,9 @@ int main(int argc, char** argv) {
                 return 1;
             }
             if (dec_timing && dec_windows > 0) {
+                if (df2_ple_overlap && req_df2)
+                    std::fprintf(stderr, "strata DFlash2 PLE: %lld token blocks requested (legacy would request %lld), %lld anchors submitted during drafting\n",
+                                 (long long) df2_ple_scheduled, (long long) df2_ple_legacy, (long long) df2_ple_overlapped);
                 const DecSnap d1 = dec_snap();
                 const double w = (double) dec_windows, L = (double) g.n_layers;
                 if (!pl_ran) {

@@ -8,6 +8,8 @@ RYZENStrata serves text with [ISTA-DASLab Qwen3.8-Flash-Next GSQ-RCO Q2_0](https
 - The native GPU path uses fused QSA attention with online softmax for prompt processing. Decode uses the GPU's paged attention path.
 - The main weights are prepared from the publisher's Q2_0 shards. The second shard supplies the N-gram table. The prepared table stays on SSD and the engine reads its rows with direct I/O.
 - The DFlash2 drafter uses Q4_0 weights. See the [original drafter](https://huggingface.co/incoai/Qwen3.8-Flash-Next-DFlash2).
+- On Windows gfx1151 the engine uses matrix cores for Q2_0 expert prefill and batched DFlash2 context updates. Small verification windows use GPU matrix-vector kernels selected for the model's actual projection shapes. Floating-point rounding can differ between kernels.
+- A 64 GiB Windows system uses an 8,192-token automatic prefill chunk to leave memory for pinned verification buffers. The default context window is 262,144 tokens.
 - HIP performs model compute. The host still runs the API, tokenizer, file reads, and GPU scheduling.
 
 The publisher reports 37.6 GB for the transformer weights and 28.8 GB for the N-gram table. These file sizes do not include the Q8 KV cache, draft model, scratch buffers, or operating-system use. A 64 GiB system with 48 GiB assigned to graphics meets the hardware target. Whether it can run the full context depends on the driver and available memory. [Model size breakdown](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF#memory-requirements)

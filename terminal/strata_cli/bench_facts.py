@@ -21,6 +21,7 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+SOURCE_ROOT = ROOT.parent if ROOT.name == "terminal" and (ROOT.parent / ".git").exists() else ROOT
 LOOPBACK = frozenset({"localhost", "127.0.0.1", "::1"})
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 MODEL_SUFFIXES = (".gguf", ".safetensors", ".pack", ".bin")
@@ -149,11 +150,12 @@ def powershell(script: str, timeout: float = 20) -> str:
     return run_cmd(["powershell", "-NoProfile", "-NonInteractive", "-Command", script], timeout)
 
 
-def sha256_file(path: Path, chunk: int = 8 << 20) -> str:
+def sha256_file(path: Path, chunk: int = 256 << 10) -> str:
     digest = hashlib.sha256()
+    buffer = memoryview(bytearray(chunk))
     with open(path, "rb") as stream:
-        while block := stream.read(chunk):
-            digest.update(block)
+        while size := stream.readinto(buffer):
+            digest.update(buffer[:size])
     return digest.hexdigest()
 
 
@@ -438,7 +440,7 @@ def os_info() -> dict:
     return {"name": name or sysinfo.system(), "version": sysinfo.release()}
 
 
-def git_commit(folder: Path = ROOT) -> str | None:
+def git_commit(folder: Path = SOURCE_ROOT) -> str | None:
     """The full commit of this checkout, or the COMMIT file a release archive carries; None for neither."""
     if (folder / ".git").exists():
         out = run_cmd(["git", "-C", str(folder), "rev-parse", "HEAD"]).strip().lower()
@@ -482,7 +484,7 @@ def software(why: Why, machine: dict, *, engine_version: str | None, build_optio
     drivers = [{"name": "gpu-driver", "version": machine["driver"]}] if machine.get("driver") else []
     block = {"os": os_info(), "drivers": drivers or None, "runtime": runtime or None,
              "strata_commit": commit, "engine_version": engine_version,
-             "build_kind": "source" if (ROOT / ".git").exists() else "release",
+             "build_kind": "source" if (SOURCE_ROOT / ".git").exists() else "release",
              "runner_commit": commit, "build_options": build_options}
     if not drivers:
         why.add("/software/drivers", "no GPU driver version was reported by the local tools")

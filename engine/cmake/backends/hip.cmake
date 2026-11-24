@@ -46,6 +46,8 @@ macro(strata_hip_pf_own)
     target_link_libraries(strata_prefill PUBLIC strata_pf_own)
     target_compile_definitions(strata_prefill PUBLIC STRATA_PREFILL_FUSED=1)
     set(_strata_pf_tests_lib strata_pf_own)
+    add_executable(hip_prefill_q2_wmma_test EXCLUDE_FROM_ALL tests/hip/prefill_q2_wmma_test.cpp)
+    target_link_libraries(hip_prefill_q2_wmma_test PRIVATE strata_prefill strata_hip_runtime)
     message(STATUS "Strata: no llama.cpp MMQ prompt kernels (HIP): Strata's own prompt kernels and the FP16 path")
 endmacro()
 

@@ -54,9 +54,10 @@ const Case CASES[] = {
     {"shexp gate Q4_K", 12, 2560, 640, 256, 144, {0, 2}},
     {"shexp down IQ4_NL", 20, 640, 2560, 32, 18, {0, -1}},
     {"router BF16", 30, 2560, 512, 1, 2, {-1, -1}},
+    {"draft head Q5_K", 13, 2560, 106299, 256, 176, {0, 2}},
     {"head Q5_K", 13, 2560, 248320, 256, 176, {0, 2}},
 };
-const int WIDTHS[] = {1, 2, 3, 4, 5, 8};
+const int WIDTHS[] = {1, 2, 3, 4, 5, 6, 7, 8};
 
 bool ck(cudaError_t e, const char* what) {
     if (e == cudaSuccess) return true;
@@ -138,6 +139,8 @@ int main(int argc, char** argv) {
         std::vector<cudaEvent_t> ev((size_t) 2 * reps);
         for (auto& e : ev) cudaEventCreate(&e);
         for (const Case& c : CASES) {
+            const bool heads_only = argc > 4 && std::strcmp(argv[4], "--q5-heads") == 0;
+            if (heads_only && (c.type != 13 || c.n_out < 65536)) continue;
             if (c.type != 30 && !K::native_mmvq_supported(c.type)) {
                 std::printf("%-18s unsupported type %d\n", c.name, c.type);
                 continue;
@@ -199,6 +202,11 @@ int main(int argc, char** argv) {
                 const bool ba = std::memcmp(ha.data(), hb.data(), ha.size() * 4) == 0;
                 const bool a_1 = std::memcmp(ha.data(), h1.data(), ha.size() * 4) == 0;
                 const bool b_1 = std::memcmp(hb.data(), h1.data(), hb.size() * 4) == 0;
+                if (heads_only) {
+                    uint64_t checksum = 14695981039346656037ull;
+                    for (uint32_t bits : ha) checksum = (checksum ^ bits) * 1099511628211ull;
+                    std::printf("head checksum %s %d %016llx\n", c.name, T, (unsigned long long) checksum);
+                }
                 long long nonfinite = 0;
                 for (uint32_t u : ha) { float f; std::memcpy(&f, &u, 4); if (!std::isfinite(f)) ++nonfinite; }
                 if (!ba || !b_1 || nonfinite) ++bad;

@@ -3677,8 +3677,9 @@ def engine_args(cfg: dict, exe: str | None = None, *, announce: bool = True) -> 
             if data is None or vocab is None or not drafting.stock_q4_ok(data):
                 raise ValueError("The verified DFlash2 Q4_0 pack or vocabulary is missing. Run setup again or choose drafting off.")
             flags = list(drafting.engine_flags(drafting.target_path(data), vocab))
-            flags[flags.index("--spec") + 1] = "4"
-            args = drafting.strip_draft_flags(args) + flags
+            flags[flags.index("--spec") + 1] = str(ryzen_policy.DFLASH_WINDOW)
+            flags[flags.index("--draft-conf") + 1] = str(ryzen_policy.DFLASH_CONFIDENCE)
+            args = user_args.merge(drafting.strip_draft_flags(args), flags)
             if announce:
                 print("[strata] Drafting: DFlash2 Q4_0", flush=True)
         return args

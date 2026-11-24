@@ -9,6 +9,7 @@
 
 #include <cmath>
 #include <cstdlib>
+#include <cstdint>
 #include <algorithm>
 
 namespace strata::spec {
@@ -68,6 +69,13 @@ inline int choose_window(const WindowRuleIn& in) {
         while (T < in.cap && (chain *= (double) in.dprob[T - 1]) >= in.draft_conf) ++T;
     }
     return T;
+}
+
+// The normal verifier skips a window that would cross the context limit.
+// The prefetcher must make the same choice, including the anchor at row zero.
+inline int prefetch_window_rows(const WindowRuleIn& in, int64_t room) {
+    const int rows = choose_window(in);
+    return rows <= room ? rows : 0;
 }
 
 // (An opt-in calibrated DFlash2 window gate, STRATA_DF2_GATE / STRATA_DF2_ROW_MS, was removed in 0.2.13: it measured 2.7-4.9% slower.)

@@ -18,6 +18,7 @@ rem ---- 1. MSVC: the linker, the C runtime and the Windows SDK (ROCm's clang us
 set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
 set "VS="
 if exist "%VSWHERE%" for /f "delims=" %%V in ('"%VSWHERE%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath') do set "VS=%%V"
+if not defined VS if exist "%VSWHERE%" for /f "delims=" %%V in ('"%VSWHERE%" -latest -prerelease -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath') do set "VS=%%V"
 if not defined VS (echo Visual Studio Build Tools with the C++ workload are needed & exit /b 1)
 call "%VS%\VC\Auxiliary\Build\vcvars64.bat" >nul || exit /b 1
 where cmake >nul 2>nul || (echo CMake is needed & exit /b 1)

@@ -58,5 +58,6 @@ def test_stock_drafter_is_verified_and_has_no_fallback(monkeypatch):
     args = server.engine_args(cfg, announce=False)
     assert args[args.index("--draft-model") + 1] == str(drafting.target_path(root))
     assert args[args.index("--draft-fallback") + 1] == "none"
-    assert args[args.index("--spec") + 1] == "4"
+    assert args.count("--spec") == 1
+    assert args[args.index("--spec") + 1] == str(policy.DFLASH_WINDOW)
     assert "--mtp" not in args

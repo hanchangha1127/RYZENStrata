@@ -3358,6 +3358,8 @@ namespace {
 // order, adds the four sums as warp 0 adds the other warps' partials, then the same warp_sum: every output is bit for
 // bit native_q2_0_mmvq_kernel's (one column) and launch_multi's exact layout (two to four).  80 -> 31 us at three
 // columns, 37 -> 25 us at one.  STRATA_Q2_WARP=0 keeps the old kernels; =1 takes this one on any CUDA card.
+// The same reduction on wave32 gfx1151. Limit the opt-in to Flash-Next's 2560-wide dense projections
+// and the first four verify rows.
 constexpr int kQ20WarpRows = 4;
 template <int NCOLS>
 __global__ void __launch_bounds__(WARPS * WARP) q2_0_warp_rows_kernel(const Q20Block* __restrict__ w,
@@ -3400,8 +3402,21 @@ __global__ void __launch_bounds__(WARPS * WARP) q2_0_warp_rows_kernel(const Q20B
             if (lane == i && row0 + i < n_out) y[std::size_t(j) * n_out + row0 + i] = sum;
         }
 }
-bool q2_0_warp_rows_on() {
+bool q2_0_warp_rows_on(int n_in) {
     static int on[16] = {};   // by device ordinal: 0 unknown, 1 yes, -1 no
+#if defined(__HIPCC__)
+    const char* enabled = std::getenv("STRATA_HIP_Q2_WARP");
+    if (n_in != 2560 || !enabled || std::strcmp(enabled, "1") != 0) return false;
+    int dev = 0;
+    if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 16) return false;
+    if (on[dev] == 0) {
+        cudaDeviceProp prop{};
+        const bool ok = cudaGetDeviceProperties(&prop, dev) == cudaSuccess;
+        if (!ok) cudaGetLastError();
+        on[dev] = ok && prop.warpSize == WARP && strata::kernels::gfx_arch_is_gfx1151(prop.gcnArchName) ? 1 : -1;
+    }
+#else
+    (void) n_in;
     static const int env = [] { const char* v = std::getenv("STRATA_Q2_WARP"); return v ? (v[0] == '0' ? 0 : 1) : -1; }();
     if (env >= 0) return env == 1;
     int dev = 0;
@@ -3413,6 +3428,7 @@ bool q2_0_warp_rows_on() {
         if (!ok) cudaGetLastError();
         on[dev] = ok && strata::sm75_default(maj, mnr) ? 1 : -1;   // Turing only, with STRATA_SM75_PERF=1
     }
+#endif
     return on[dev] > 0;
 }
 }  // namespace
@@ -3426,9 +3442,11 @@ void native_q2_0_mmvq(const void* weights, const void* x_q8_1, float* y,
     validate_pointer(y);
     validate_stream(stream);
     STRATA_WAVE_MMVQ(Q20Traits)
-#if !defined(__HIPCC__)
-    // one column always (bitwise the single-column kernel); two to four only where the exact layout is the one in use
-    if (ncols <= 4 && (ncols == 1 || g_multi_exact) && q2_0_warp_rows_on()) {
+    // One column always uses the exact layout. For wider windows keep the configured reduction order.
+    if (ncols <= 4 && (ncols == 1 || g_multi_exact) && q2_0_warp_rows_on(n_in)) {
+#if defined(__HIPCC__)
+        strata::dispatch::note("native MMVQ: gfx1151 Q2_0 warp-row path");
+#endif
         const auto* w = static_cast<const Q20Block*>(weights);
         const auto* x = static_cast<const Q81Block*>(x_q8_1);
         const auto s = static_cast<cudaStream_t>(stream);
@@ -3443,7 +3461,6 @@ void native_q2_0_mmvq(const void* weights, const void* x_q8_1, float* y,
         launch_check();
         return;
     }
-#endif
     if (ncols > 1) {
         launch_multi<Q20Traits>(weights, x_q8_1, y, n_in, n_out, ncols, stream);
         launch_check();
@@ -3483,6 +3500,18 @@ void native_q3_k_mmvq(const void* weights, const void* x_q8_1, float* y,
     validate_pointer(x_q8_1);
     validate_pointer(y);
     validate_stream(stream);
+#if defined(__HIPCC__)
+    // The gfx1151 A/B won at 3–8 columns for these Q2_0 pack projections.
+    // For a single column only the common 2560-wide shapes above 512 rows won.
+    const bool common = n_in == 2560 && (n_out == 640 || n_out == 6144 || n_out == 10240 || n_out == 12288);
+    const bool multi_only = (n_in == 2560 && n_out == 512) || (n_in == 6144 && n_out == 2560);
+    const bool measured = ncols == 1 ? common : (ncols >= 3 && ncols <= 8 && (common || multi_only));
+    if (measured && rdna_kq_mmvq(11, weights, x_q8_1, y, n_in, n_out, ncols, stream)) {
+        strata::dispatch::note("native MMVQ: gfx1151 Q3_K wave32 path");
+        launch_check();
+        return;
+    }
+#endif
     STRATA_WAVE_MMVQ(Q3KTraits)
     if (ncols > 1) {
         launch_multi<Q3KTraits>(weights, x_q8_1, y, n_in, n_out, ncols, stream);
