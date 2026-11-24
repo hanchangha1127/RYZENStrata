@@ -26,7 +26,7 @@ async function startOfflineHost() {
   let output = '';
   const host = spawn(process.execPath, ['--import', preload, 'server/index.mjs'], {
     cwd: root, stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, STRATA_HOME: home, STRATA_MODELS_DIR: join(home, 'models'), STRATA_PORT: String(port), STRATA_SHARE_PORT: String(await freePort()), STRATA_TUNNEL_PORT: String(await freePort()), STRATA_PACKAGED: '1', STRATA_COMPONENTS_DIR: join(home, 'components'), STRATA_NET_LOG: log, STRATA_NO_ACQUIRE: '1', STRATA_REAL_ENGINE: '0', STRATA_TEST_HARDWARE: ROOMY_HOST },
+    env: { ...process.env, STRATA_RYZEN_EDITION: '1', STRATA_HOME: home, STRATA_MODELS_DIR: join(home, 'models'), STRATA_PORT: String(port), STRATA_SHARE_PORT: String(await freePort()), STRATA_TUNNEL_PORT: String(await freePort()), STRATA_PACKAGED: '1', STRATA_COMPONENTS_DIR: join(home, 'components'), STRATA_NET_LOG: log, STRATA_NO_ACQUIRE: '1', STRATA_REAL_ENGINE: '0', STRATA_TEST_HARDWARE: ROOMY_HOST },
   });
   host.stdout.on('data', d => { output += d; }); host.stderr.on('data', d => { output += d; });
   let up = false;
@@ -38,7 +38,7 @@ async function startOfflineHost() {
   return { host, get, post, calls, stop: async () => { host.kill(); await new Promise(r => host.once('exit', r)); await rm(home, { recursive: true, force: true }).catch(() => {}); } };
 }
 
-test('with no internet the host starts, serves its screens and loads a model without one outside call', async t => {
+test('with no internet the Ryzen host serves screens and refuses an alternate model without one outside call', async t => {
   const h = await startOfflineHost();
   t.after(h.stop);
   assert.deepEqual(h.calls(), [], 'nothing reached out while starting');
@@ -47,25 +47,21 @@ test('with no internet the host starts, serves its screens and loads a model wit
     assert.equal(r.status, 200, `${path} answers`);
   }
   const install = await h.post('/api/models/qwen38-q4_k_m/install');
-  assert.equal(install.status, 200);
-  let installed = false;
-  for (let i = 0; i < 150 && !installed; i++) { installed = (await h.get('/api/models')).data.variants.find(v => v.id === 'qwen38-q4_k_m').state === 'installed'; if (!installed) await delay(100); }
-  assert.ok(installed, 'the model is on this computer');
+  assert.equal(install.status, 409);
   const load = await h.post('/api/models/qwen38-q4_k_m/load');
-  assert.equal(load.status, 200, JSON.stringify(load.data));
-  assert.equal(load.data.loaded, 'qwen38-q4_k_m');
-  assert.deepEqual(h.calls(), [], 'opening the screens and loading a model made no outside call');
+  assert.equal(load.status, 409);
+  assert.deepEqual(h.calls(), [], 'opening the screens and rejecting an alternate model made no outside call');
 });
 
-test('the update check reaches out only when it is asked for, and offline it answers in plain words', async t => {
+test('the Ryzen host does not check the upstream update feed', async t => {
   const h = await startOfflineHost();
   t.after(h.stop);
   await h.get('/api/setup'); await h.get('/api/native'); await h.get('/api/models');
   assert.equal(h.calls().length, 0, 'opening the screens does not check');
   const checked = await h.get('/api/updates/check');
   assert.equal(checked.status, 200);
-  assert.equal(h.calls().length, 1, 'one check, from the click');
-  assert.equal(checked.data.strata.status, 'error');
-  assert.equal(checked.data.strata.message, "No internet connection. Try again when you're online.");
+  assert.equal(h.calls().length, 0, 'no update request, even when explicitly asked');
+  assert.equal(checked.data.strata.status, 'unknown');
+  assert.match(checked.data.strata.message, /RYZENStrata/);
   assert.doesNotMatch(JSON.stringify(checked.data), /fetch failed/);
 });

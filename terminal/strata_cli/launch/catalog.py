@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from strata_cli.launch import settings as S
+from strata_control import ryzen_policy
 
 
 def _merge_families(cat: Any, families: dict) -> dict:
@@ -415,34 +416,15 @@ class Catalog:
 
     def computer(self, fresh: bool = False) -> Computer:
         hw = self.hardware(fresh)
-        return Computer(ram_gb=hw.get("ram_gb"), gpus=list(hw.get("gpus") or []), disk_free_gb=hw.get("disk_free_gb"),
+        return Computer(ram_gb=hw.get("ram_gb"), gpus=ryzen_policy.target_cards(hw.get("gpus") or []), disk_free_gb=hw.get("disk_free_gb"),
                         os=str(hw.get("os") or ""), avx2=(hw.get("cpu") or {}).get("avx2"), raw=hw,
                         engine_vendor=self.engine_vendor(hw))
 
     def installed_backend(self) -> str | None:
-        """The installed engine's backend (cuda, hip, sycl, cpu, metal), None when there is no usable engine yet."""
-        try:
-            from strata_control import engine_component as ec
-            rep = ec.status()
-            if rep.get("usable"):
-                return (rep.get("engine") or {}).get("backend")
-        except Exception:                                    # noqa: BLE001
-            pass
-        return None
+        return "hip"
 
     def engine_vendor(self, hw: dict | None = None) -> str | None:
-        """The make of card the engine drives: the installed engine's; with none installed, the engine setup would fetch (NVIDIA first when the
-        computer has several makes)."""
-        from strata_control import engine_component as ec, gpu_fit
-        hw = hw if hw is not None else self.hardware()
-        chosen = None
-        try:
-            backend, how = ec.detect_backend()
-            if how in ("environment", "saved choice"):          # the person's own choice (--backend, STRATA_ENGINE_BACKEND) beats the installed engine
-                chosen = backend
-        except Exception:                                      # noqa: BLE001
-            pass
-        return gpu_fit.pick_vendor(list(hw.get("gpus") or []), chosen or self.installed_backend())
+        return "amd"
 
     # ---- the tables
     def tables(self):
@@ -450,17 +432,10 @@ class Catalog:
         return models, families, list(contexts), source
 
     def contexts(self) -> list[int]:
-        return [int(c) for c in self.tables()[2]]
+        return list(ryzen_policy.CONTEXTS)
 
     def contexts_for(self, family: str | None, model: str | None = None) -> list[int]:
-        """The context sizes to offer for this model: Hy4-Flash's own list (8K..128K), else the shared list."""
-        if family == "hy4-flash":
-            from strata_control import hy4_family
-            return list(hy4_family.CONTEXTS)
-        if family == "inkling-2-mini":
-            from strata_control import inkling_family
-            return list(inkling_family.CONTEXTS)
-        return self.contexts()
+        return list(ryzen_policy.CONTEXTS)
 
     def recommendation(self, hw: dict | None = None) -> dict:
         return self.strata.recommend(hw or self.hardware())
@@ -548,28 +523,9 @@ class Catalog:
         return _merge_families(self, families)
 
     def resolve(self, model: str, family: str | None = None) -> tuple[str, str]:
-        """`iq3_xxs` or `IQ3_XXS` (and an optional family) -> (family, model); raises ValueError with the closest match."""
-        models, families, _ctx, _src = self.tables()
-        all_families = _merge_families(self, families)
-        names = list(dict.fromkeys([*models, *self.strata.own_size_names()]))
-        match = next((n for n in names if n.lower() == model.lower()), None)
-        if match is None:
-            near = S.closest(model, names)
-            raise ValueError(f"There is no model called '{model}'." + (f" Did you mean '{near}'?" if near else "")
-                             + " Models: " + ", ".join(names) + ".")
-        if family is not None and family not in all_families:
-            near = S.closest(family, list(all_families))
-            raise ValueError(f"There is no model family called '{family}'." + (f" Did you mean '{near}'?" if near else "")
-                             + " Families: " + ", ".join(all_families) + ".")
-        offered = [f for f in all_families if match in self.strata.sizes_of(models, f)]
-        if family is not None:
-            if family not in offered:
-                raise ValueError(f"{all_families[family]['title']} has no size {match}. It offers: "
-                                 + ", ".join(self.strata.sizes_of(models, family)) + ".")
-            return family, match
-        if not offered:
-            raise ValueError(f"{match} is not offered by any model family here.")
-        return ("qwen" if "qwen" in offered else offered[0]), match
+        if not ryzen_policy.model_matches(family or ryzen_policy.FAMILY, model):
+            raise ValueError(ryzen_policy.MODEL_ERROR)
+        return ryzen_policy.FAMILY, ryzen_policy.MODEL
 
     def model_name_of(self, family: str | None, model: str | None) -> str | None:
         """The ``model_name`` setup writes into this model's run config (``qwen3.8-flash-next-iq3_s``), known before the model is installed: what the drafter table is keyed by."""
@@ -633,20 +589,8 @@ class Catalog:
         return tokens * 13 * table.get(kv, 1056) / 1e9
 
     def max_context(self, family: str, model: str, hw: dict | None = None) -> int | None:
-        """The context a model starts with: 128K on every card, or the largest size the model offers under it (strata_control/default_context.py,
-        the one rule of the app, the Terminal and setup). A Mac keeps its unified-memory rule."""
-        from strata_control import default_context
-        hw = hw or self.hardware()
-        if hw.get("mac") and hw.get("ram_gb") and family not in ("hy4-flash", "inkling-2-mini"):
-            mac = self.strata.mac()                           # a Mac: the context by unified memory (strata_control/mac_fit.py)
-            if mac is not None:
-                return int(mac.recommend_context(float(hw["ram_gb"])))
-        if family == "inkling-2-mini":
-            from strata_control import inkling_family
-            return inkling_family.DEFAULT_CONTEXT
-        return default_context.pick(self.contexts_for(family, model))
+        return ryzen_policy.DEFAULT_CONTEXT if ryzen_policy.model_matches(family, model) else None
 
-    # ---- pictures
     def engine_backend(self) -> str | None:
         """The installed engine's backend (cuda, hip, sycl, cpu, metal), else the one this computer's graphics card needs, else None."""
         installed = self.installed_backend()

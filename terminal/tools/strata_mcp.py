@@ -51,6 +51,10 @@ VERSION = "0.1.0"
 WIN = os.name == "nt"
 _INSTALL_SEQ = itertools.count(1)
 DEFAULT_ROOT = Path(__file__).resolve().parent.parent
+if str(DEFAULT_ROOT) not in sys.path:
+    sys.path.insert(0, str(DEFAULT_ROOT))
+from strata_control import discovery, ryzen_policy
+
 # The desktop app runs this under Strata Control's Python (STRATA_CONTROL_INSTALL=1): the install runs on that Python, makes no
 # .venv and installs no package (setup.py's own CONTROL mode).
 CONTROL = os.environ.get("STRATA_CONTROL_INSTALL") == "1"
@@ -778,11 +782,7 @@ class Strata:
 
     # ---- paths
     def settings_path(self) -> Path:
-        if os.environ.get("STRATA_SETTINGS_FILE"):
-            return Path(os.environ["STRATA_SETTINGS_FILE"])
-        if WIN:
-            return Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming") / "Strata" / "settings.json"
-        return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "strata" / "settings.json"
+        return discovery.own_settings_file()
 
     def data_dir(self) -> Path:
         try:
@@ -790,7 +790,7 @@ class Strata:
         except (OSError, ValueError):
             s = {}
         d = s.get("data_dir") if isinstance(s, dict) else None
-        return Path(d) if d else self.root.parent / "Strata-data"
+        return Path(d) if d else discovery.default_data_dir()
 
     def allowed_roots(self) -> list[Path]:
         return [norm(self.root), norm(self.data_dir())]
@@ -1416,175 +1416,31 @@ class Strata:
         return self._feed_rows(out, self.setup_module())
 
     def recommend(self, hw: dict) -> dict:
-        """setup.py's own rules: the size it preselects (IQ3_XXS from 60 GB of RAM, else the first, Q2_0), the
-        Coder below the full model's RAM (setup's RAM table), the low-RAM mode when the GPU makes up for the RAM, and
-        the context it preselects for the card's VRAM (32K under 14 GB, 64K under 20 GB, else 128K)."""
-        models, families, _ctx, _src = self.tables()
-        if hw.get("mac"):
-            return self._mac_recommend(hw, models, families)
-        S = self.setup_module()
-        usable = self.engine_gpus(hw)
-        ram = hw.get("ram_gb") or 0
-        if not usable:
-            why = ("no NVIDIA RTX 20-series-or-newer GPU found (nvidia-smi did not list one)"
-                   + ("; the AMD graphics in this PC is not a card Strata supports (an RX 7000 or 9000 series card, or a Ryzen AI Max, is needed)" if WIN and any(
-                       "amd" in str(a.get("name", "")).lower() or "radeon" in str(a.get("name", "")).lower()
-                       for a in hw.get("display_adapters", [])) else ""))
-            return {"family": None, "model": None, "why": why}
-        best = max(usable, key=lambda g: (round(g["vram_gb"]), -g.get("index", 0)))
-        vram = best["vram_gb"]
-        backend = "hip" if best.get("vendor") == "amd" else "sycl" if best.get("vendor") == "intel" else "cuda"
-
-        def low_fits(m):
-            try:
-                return S.low_ram_fits(m, ram, vram) if S else ram - 6 + max(0.0, vram - 5 - 1.0) >= models[m]["arena_gb"]
-            except Exception:                           # noqa: BLE001
-                return False
-        notes = []
-        # 0.2.0, the owner's memory tiers (README "The other sizes"; setup.py MEMORY_TIERS holds the same floors): RAM + VRAM
-        # together.  An APU's shared memory is the RAM itself, so only its BIOS carve-out counts as VRAM.
-        tvram = float(best.get("dedicated_gb", 0.0)) if best.get("uma") else float(vram)
-        tier = next(((f, n) for lo, f, n in MEMORY_TIERS if ram + tvram - TIER_SYSTEM_RESERVE_GB >= lo), None)
-        if tier and tier[1] in models and tier[0] in families:
-            fam, model = tier
-            total = f"{ram:.0f} GB of RAM + {tvram:.0f} GB of VRAM = {ram + tvram:.0f} GB, {TIER_SYSTEM_RESERVE_GB:.0f} GB of it kept for Windows and the system"
-            if model == "IQ2_XS":
-                why = (f"{total}, the 40 GB tier: Swift 1.5's IQ2_XS (thinks for a shorter time)"
-                       + ("; Gyro-M (35 GB) is the other choice there, close to IQ3_XXS in quality but 16-21% slower at "
-                          "writing answers than Q2_0" if "Gyro-M" in models and best.get("vendor") in ("nvidia", "amd", "intel") else ""))
-            elif model == "IQ3_XXS":
-                why = f"{total}, the 48 GB tier: IQ3_XXS (better quality, slower)"
-            else:
-                why = (f"{total}, the 64 GB tier: IQ3_S (matches the full model, the slowest); Swift 1.5's IQ3_S is an "
-                       "equal choice")
-        elif ram >= 60:
-            fam, model, why = "qwen", "IQ3_XXS", f"{ram:.0f} GB of RAM: setup's own pick from 60 GB (better quality)"
-        elif ram >= models["Q2_0"]["ram_gb"] - 4:
-            fam, model, why = "qwen", "Q2_0", f"{ram:.0f} GB of RAM: the full model's fastest size fits"
-        elif ram >= models["IQ1_M"]["ram_gb"] - 4:
-            fam, model, why = "coder", "IQ1_M", (f"{ram:.0f} GB of RAM: the full model needs ~48 GB; the Coder "
-                                                 "(half the experts, best for code) needs ~32 GB")
-        elif low_fits("IQ1_M"):
-            fam, model, why = "coder", "IQ1_M", (f"{ram:.0f} GB of RAM is below the Coder's 32 GB, but the GPU's "
-                                                 f"{vram:.0f} GB make up for it (setup's low-RAM mode: slower)")
-        elif "Gyro-S" in models and ram + vram >= models["Gyro-S"]["ram_gb"] + GYRO_ROOM_GB:
-            # Gyro (agentionai): only where the sizes above do not fit.  Their memory figure (Gyro-S 27.6 GB, Gyro-M 35 GB)
-            # is VRAM + RAM together and the system needs room beside it, so GYRO_ROOM_GB more is asked for here.
-            # Gyro-M when this PC has that much, else Gyro-S.
-            model = "Gyro-M" if ram + vram >= models["Gyro-M"]["ram_gb"] + GYRO_ROOM_GB else "Gyro-S"
-            fam, why = "gyro", (f"{ram:.0f} GB of RAM is below the Coder's 32 GB, but RAM + VRAM = {ram + vram:.0f} GB "
-                                f"holds {model} ({models[model]['ram_gb']} GB of memory in total; the quality is lower "
-                                "than the 2-3-bit sizes, and it needs the whole download on a fast SSD)")
-        elif self.inkling_visible() and ram >= 8:
-            from strata_control import inkling_family, inkling_fit
-            rec_ink = inkling_fit.recommend(vram, ram)
-            b = rec_ink["build"]
-            dl_gb = round(sum((inkling_family.size_of(n) or 0) for n in inkling_family.files_of(b, vision=True, dspark=True)) / 1e9, 1)
-            why = (f"{ram:.0f} GB of RAM + {vram:.0f} GB of VRAM: Inkling-2-Mini {b} ({inkling_fit.BUILDS[b]['footprint_gb']:.1f} GB) "
-                   f"runs cleanly on 4+ GB GPUs with routed experts in RAM")
-            cmd = (("START-HERE.bat --setup" if WIN else "./setup.sh --setup") +
-                   f" --yes --family {inkling_family.FAMILY} --model {b} --context {inkling_family.DEFAULT_CONTEXT}" +
-                   (f" --backend {backend}" if backend in ("hip", "sycl") else ""))
-            return {"family": inkling_family.FAMILY, "model": b, "title": f"{inkling_family.TITLE} {b}",
-                    "context": inkling_family.DEFAULT_CONTEXT, "backend": backend,
-                    "gpu": {k: best.get(k) for k in ("index", "name", "vram_gb")},
-                    "download_gb": dl_gb, "why": why, "notes": notes, "setup_command": cmd}
-        else:
-            return {"family": None, "model": None, "why": f"{ram:.0f} GB of RAM: Strata needs 32 GB or more "
-                                                          "(the smallest model, the Coder, keeps ~23 GB of experts in "
-                                                          "RAM)"}
-        ctx = 131072                                       # 128K on every card (owner, 2026-11-01)
-        # #3425: the tiers count RAM + VRAM together, but the desktop keeps about 10 GB of the RAM and the card keeps ~6 GB for
-        # its dense weights, so a PC at the floor of its tier reads part of the experts from the SSD at every answer.  Said
-        # plainly beside the pick (the same arithmetic as the app's "This computer" card); the pick itself stays the owner's tier.
-        arena = float(models[model].get("arena_gb") or 0)
-        spill = arena - max(0.0, tvram - 6.0) - max(0.0, ram - 10.0)
-        if arena and spill >= 4.0:
-            notes.append(f"about {spill:.0f} GB of {model} would be read from the SSD while answering (this PC's RAM leaves about 10 GB "
-                         "for the system and the card holds the rest): expect a few tokens per second on a SATA or USB drive, more "
-                         "on a fast NVMe. A smaller size fits better; it is a recommendation, every size stays a choice")
-        if vram < 11:
-            notes.append("less than 12 GB of VRAM: it runs, but slowly (most experts stay on the CPU)")
-        if hw.get("cpu", {}).get("avx2") is False:      # #623: a warning, not a stop (setup compiles for it)
-            notes.append("this CPU has no AVX2: EXPERIMENTAL and slow - setup compiles the engine on this PC for the "
-                         "older CPU (10-20 minutes), and the CPU's share of the experts runs a few times slower")
-        if backend == "hip":
-            notes.append("AMD (experimental): pictures are on; the reader runs on the CPU under 24 GB of VRAM and on the GPU from 24 GB")
-        if backend == "sycl":
-            from strata_control import intel_app
-            notes.append(intel_app.NO_DOWNLOAD)
-        cmd = (("START-HERE.bat --setup" if WIN else "./setup.sh --setup") +
-               f" --yes --family {fam} --model {model} --context {ctx}" + (f" --backend {backend}" if backend in ("hip", "sycl") else ""))
-        return {"family": fam, "model": model, "title": families[fam]["title"] + " " + model, "context": ctx,
-                "backend": backend, "gpu": {k: best.get(k) for k in ("index", "name", "vram_gb")},
-                "download_gb": models[model]["download_gb"], "why": why, "notes": notes, "setup_command": cmd}
+        issue = ryzen_policy.hardware_problem(hw)
+        if issue:
+            return {"family": None, "model": None, "why": issue}
+        card = max(ryzen_policy.target_cards(hw["gpus"]), key=lambda g: float(g.get("vram_gb") or 0))
+        note = ryzen_policy.vram_note([card])
+        return {"family": ryzen_policy.FAMILY, "model": ryzen_policy.MODEL, "title": ryzen_policy.TITLE,
+                "context": ryzen_policy.DEFAULT_CONTEXT, "backend": "hip",
+                "gpu": {k: card.get(k) for k in ("index", "name", "vram_gb")},
+                "download_gb": self.tables()[0][ryzen_policy.MODEL]["download_gb"],
+                "why": "for Ryzen AI Max+ 395 and 495 systems", "notes": [note] if note else [],
+                "setup_command": ("START-HERE.bat" if WIN else "./setup.sh") + " --setup --yes"}
 
     def model_table(self, hw: dict | None) -> list:
-        if (hw or {}).get("mac"):
-            return self._mac_model_table(hw)
-        models, families, _ctx, _src = self.tables()
-        S = self.setup_module()
-        ram = (hw or {}).get("ram_gb")
-        usable = self.engine_gpus(hw)
-        vram = max((g["vram_gb"] for g in usable), default=0.0)
-        from strata_control import fit_label
-        card_room = fit_label.card_room_gb(usable)
-        have = {c.stem[len("strata-"):] for c in self.configs()}
-        out = []
-        for f, fd in sorted(families.items(), key=lambda kv: bool(kv[1].get("feed"))):      # the signed feed's models after the built-in ones (False sorts first, the order is kept)
-            sizes = []
-            for m in self.sizes_of(models, f):
-                own = self.own_size(f, m)
-                d = own or models[m]
-                tag = (fd.get("tag", "") + m).lower()
-                # the model's files without the lookup table's file (download size minus the table) against the card's memory plus the RAM: "fits" or "may run slower"
-                # (strata_control/fit_label.py, the owner's one rule)
-                memory_gb = round(float(d["ram_gb"]) if d.get("mem_total") else float(d.get("arena_gb") or d["ram_gb"]) + 1.0, 1)      # the placement estimate (experts + dense)
-                fit_gb = fit_label.files_gb(f, m, d)          # what the label and the Terminal's "Needs" column use
-                verdict = None
-                if ram is not None:
-                    verdict = fit_label.label(fit_gb, ram, card_room)
-                hy4 = None
-                ink = None
-                if d.get("hy4"):                              # Tencent Hy4-Flash: the author's rank-cut rule (strata_control/hy4_fit.py), not the weights-against-RAM rule; the Engram shard is read from the SSD
-                    memory_gb, fit_gb = d["footprint_gb"], d["footprint_gb"]
-                    hy4 = self.hy4_fit_row(m, ram, usable)
-                    verdict = None if hy4 is None else ("may run slower" if hy4["mode"] == "cross_tier_ssd" else "fits")
-                elif d.get("inkling"):                        # Thinking Machines Inkling-2-Mini (strata_control/inkling_fit.py)
-                    memory_gb, fit_gb = d["footprint_gb"], d["footprint_gb"]
-                    ink = self.inkling_fit_row(m, ram, usable)
-                    verdict = None if ink is None else ("may run slower" if ink["mode"] == "cross_tier_ssd" else "fits")
-                sizes.append({"model": m, "about": d["about"], "download_gb": d["download_gb"],
-                              **({"hy4": hy4} if hy4 else {}),
-                              **({"inkling": ink} if ink else {}),
-                              **({"format": d["format"]} if d.get("format") else {}),
-                              "experimental": bool(d.get("experimental")),
-                              "images": d.get("vision", fd.get("vision", True)) is not False,
-                              # which picture reader "pictures on" gets on this PC (strata_control/vision_reader.py, the one rule: the CPU reader
-                              # under 24 GB of graphics memory, the GPU reader from 24 GB; the person can switch it per model)
-                              "images_reader": self.images_reader(vram),
-                              "ram_needed_gb": d["ram_gb"], "experts_gb": d.get("arena_gb"),
-                              # RAM + VRAM the weights need together, WITHOUT the n-gram table (that stays on the SSD): Gyro states it
-                              # (mem_total), for the rest the experts plus ~1 GB for the dense part (Swift IQ2_XS: 35.5 + 1 = 36.5)
-                              "mem_total": bool(d.get("mem_total")), "multi_file": False,
-                              "disk_gb": None,
-                              # the first engine that reads this size's files (setup.py "engine"); the app says "needs a newer engine"
-                              # with the update step when the installed one is older. None: any engine that setup accepts.
-                              "engine_min": ".".join(map(str, d["engine"])) if d.get("engine") else None,
-                              "memory_gb": memory_gb, "fit_gb": fit_gb,
-                              # Qwen3.6: the conversation memory per token and what the card holds before it (strata_control/own_path_fit.py,
-                              # #5715): the app's context estimate and its warning use these; absent for every other model
-                              **({"context_fit": d["context_fit"]} if d.get("context_fit") else {}),
-                              "on_this_pc": verdict, "installed": tag in have, "id": tag,
-                              "rdna4_faster": None,
-                              # which graphics cards to use for it (strata_control/gpu_fit.py, the one rule app / Terminal / setup share):
-                              # only with two or more cards that count; "recommended" names the pre-selected option
-                              "gpu_options": None if own else self.gpu_options(d, ram, hw)})   # Qwen3.6 runs on one card so far
-            out.append({"family": f, "title": fd["title"], "about": fd.get("about"),
-                        "experimental": bool(fd.get("experimental")),
-                        "images": any(x["images"] for x in sizes) if sizes else fd.get("vision", True) is not False,
-                        "sizes": sizes})
-        return self._feed_rows(out, S)
+        models, _families, _ctx, _src = self.tables()
+        info = models[ryzen_policy.MODEL]
+        have = any(ryzen_policy.runtime_problem(self.read_config(c)) is None for c in self.configs())
+        issue = ryzen_policy.hardware_problem(hw) if hw else None
+        note = ryzen_policy.vram_note(hw.get("gpus") or []) if hw else None
+        return [{"family": ryzen_policy.FAMILY, "title": "ISTA-DASLab Qwen3.8-Flash-Next",
+                 "about": "Q2_0 for AMD Ryzen AI Max+ 395 and 495", "images": False, "experimental": False,
+                 "sizes": [{"model": ryzen_policy.MODEL, "about": info["about"], "download_gb": info["download_gb"],
+                            "ram_needed_gb": ryzen_policy.MIN_RAM_GIB, "experts_gb": info["arena_gb"],
+                            "memory_gb": info["arena_gb"] + 1.0, "fit_gb": info["arena_gb"] + 1.0,
+                            "id": "q2_0", "images": False, "installed": have,
+                            "on_this_pc": issue or note or ("fits" if hw else None)}]}]
 
     def _feed_rows(self, out: list, S) -> list:
         """The signed feed's models in a model table: their family rows carry `feed: true`; a model this engine does not run has `available: false` and the reason
@@ -2210,6 +2066,7 @@ MODEL_ID_PATTERN = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,48}"
 
 
 def tool_defs(models: dict, families: dict, contexts: list) -> list:
+    contexts = ryzen_policy.CONTEXTS
     port = {"type": "integer", "minimum": 1024, "maximum": 65535,
             "description": "the server's port (default: the installed model's port, usually 8080)"}
     installed_model = {"type": "string", "pattern": MODEL_ID_PATTERN, "maxLength": 49,
@@ -2250,45 +2107,17 @@ def tool_defs(models: dict, families: dict, contexts: list) -> list:
                         "it (it resumes later). Defaults: the recommended model and context for this PC, pictures on where the model can read them. "
                         "After it finishes, start the model with strata_start.",
          "inputSchema": {"type": "object", "additionalProperties": False, "properties": {
-             "family": {"type": "string", "enum": list(families),
-                        "description": "qwen = Qwen3.8-Flash-Next (the original), swift = Swift 1.5 (thinks "
-                                       "shorter), coder = the Coder (half the experts, ~32 GB RAM, for code), "
-                                       "unsloth = Unsloth's 1- to 8-bit files (UD-IQ4_XS, UD-Q4_K_XL, UD-Q5_K_XL, "
-                                       "UD-Q6_K_XL, Q8_0): every expert in RAM where they fit, else part of them read "
-                                       "from the SSD"},
-             "model": {"type": "string", "enum": list(models),
-                       "description": "the size (quantization): see strata_models"},
-             "context": {"type": "integer", "minimum": 1024, "maximum": 2097152, "examples": contexts,
-                         "description": "context length in tokens (more needs more VRAM). Any whole number works, "
-                                        "for example one typed into a model's run config by hand; the usual sizes are "
-                                        f"{', '.join(str(c) for c in contexts)}"},
-             "vision": {"type": "string", "enum": ["no", "yes", "gpu", "cpu"],
-                        "description": "let the model read images (~0.9 GB more download). Default yes where the model can "
-                                       "read them (not on a Mac): yes = the best reader for this card (the CPU "
-                                       "under 24 GB of VRAM, the GPU from 24 GB, any make), gpu / cpu = that "
-                                       "reader, no = text only"},
-             "kv": {"type": "string", "enum": ["int8", "q4_0", "k8v4"],
-                    "description": "KV cache precision above 8K context (default int8)"},
-             "gpu": {"type": "integer", "minimum": 0, "maximum": 63,
-                     "description": "one GPU, as nvidia-smi numbers them (default: the one with the most VRAM)"},
-             "gpus": {"type": "string", "pattern": GPUS_PATTERN, "maxLength": 40,
-                      "description": "several GPUs sharing the model: '0,2' or 'all' (experimental)"},
-             "backend": {"type": "string", "enum": ["auto", "cuda", "hip", "sycl"],
-                         "description": "auto (default), cuda = NVIDIA, hip = AMD on Linux (experimental), sycl = Intel Arc on Linux "
-                                        "(experimental; the model's files must already be on this computer: gguf_dir)"},
-             "low_ram": {"type": "string", "enum": ["auto", "on", "off", "resident", "mmap"],
-                         "description": "setup's low-RAM mode (default auto)"},
-             "port": {**port, "description": "the port the model will listen on (default 8080)"},
-             "data_dir": {"type": "string", "maxLength": 260,
-                          "description": "where the model files go (default: the Strata-data folder next to the "
-                                         "Strata folder). Only the current data folder, a folder inside the Strata "
-                                         "folder, or a new absolute path whose last folder is named Strata... "
-                                         "(e.g. D:\\Strata-data) outside system folders"},
-             "drafter": {"type": "string", "enum": ["mtp", "dflash2"],
-                         "description": "which drafter this model will use: dflash2 downloads only DFlash2's drafter (a separate step), not the MTP draft layer's ~5 GB; "
-                                        "mtp (the default) downloads the draft layer"},
-             "mtp": {"type": "string", "enum": ["on", "off"],
-                     "description": "off = Drafting Off: the MTP draft layer (~5 GB) is not downloaded and the model starts without it (setup --mtp off)"},
+             "family": {"type": "string", "enum": [ryzen_policy.FAMILY]},
+             "model": {"type": "string", "enum": [ryzen_policy.MODEL]},
+             "context": {"type": "integer", "minimum": 1, "maximum": ryzen_policy.DEFAULT_CONTEXT,
+                         "examples": contexts, "description": "context length in tokens (default 262144)"},
+             "vision": {"type": "string", "enum": ["no"]},
+             "kv": {"type": "string", "enum": [ryzen_policy.KV], "description": "Q8 KV cache"},
+             "gpu": {"type": "integer", "minimum": 0, "maximum": 63},
+             "backend": {"type": "string", "enum": ["hip"]},
+             "port": port,
+             "data_dir": {"type": "string", "maxLength": 260},
+             "drafter": {"type": "string", "enum": [ryzen_policy.DRAFTER, "off"]},
              "gguf_dir": {"type": "string", "maxLength": 260,
                           "description": "a folder that already holds this model's GGUF files under their original names: setup "
                                          "checks them (size and SHA-256) and does not download them again"},
@@ -2417,20 +2246,17 @@ class Tools:
     def strata_models(self) -> dict:
         s = self.s
         hw = s.hardware()
-        _m, _f, contexts, src = s.tables()
-        rec = s.recommend(hw)
-        return {"summary": "Model families and sizes setup offers" + (
-                    f"; recommended for this PC: {rec['title']}, {rec['context'] // 1024}K context"
-                    if rec.get("model") else f"; no model fits this PC: {rec['why']}"),
-                "families": s.model_table(hw), "contexts": contexts,
-                "context_note": "longer contexts need more VRAM (fewer experts fit on the GPU); past 262144 setup adds "
-                                "rope scaling (experimental)",
-                "recommendation": rec, "source": src,
-                "this_pc": {"ram_gb": hw.get("ram_gb"),
-                            "gpus": [{k: g.get(k) for k in ("index", "name", "vram_gb", "usable", "vendor")}
-                                     for g in hw.get("gpus", [])],
-                            **({"engine_vendor": hw["engine_vendor"]} if hw.get("engine_vendor") else {}),
-                            **({"gpu_note": hw["gpu_note"]} if hw.get("gpu_note") else {})}}
+        error = ryzen_policy.hardware_problem(hw)
+        warning = ryzen_policy.vram_note(hw.get("gpus") or [])
+        cards = ryzen_policy.target_cards(hw.get("gpus") or [])
+        installed = ryzen_policy.installed_memory_gib(float(hw.get("ram_gb") or 0), cards)
+        return {"summary": ryzen_policy.TITLE, "edition": "ryzen",
+                "ryzen_hardware": {"supported": error is None, "error": error, "warning": warning},
+                "families": s.model_table(hw), "contexts": ryzen_policy.CONTEXTS,
+                "context_note": "256K is the default. Shorter contexts leave more GPU memory available.",
+                "recommendation": s.recommend(hw), "source": "setup.py",
+                "this_pc": {"ram_gb": installed, "os_visible_ram_gb": hw.get("ram_gb"),
+                            "engine_vendor": "amd", "gpus": cards}}
 
     # ---- strata_remove
     def strata_remove(self, model=None, confirm=False) -> dict:
@@ -2486,10 +2312,10 @@ class Tools:
             raise ToolError("data_dir must not contain '..'")
         n = norm(p)
         current = norm(s.data_dir())
-        if n == current or is_inside(n, norm(s.root)) or n == norm(s.root.parent / "Strata-data"):
+        if n == current or is_inside(n, norm(s.root)) or n == norm(discovery.default_data_dir()):
             pass
         else:
-            if not p.name.lower().startswith("strata"):
+            if not p.name.lower().startswith(("strata", "ryzenstrata")):
                 raise ToolError(f"data_dir {raw!r}: a new data folder must be named Strata... (e.g. "
                                 f"{Path(p.anchor or '/') / 'Strata-data'}), so that no other folder is filled with "
                                 "model files")
@@ -2568,31 +2394,28 @@ class Tools:
 
     def install_plan(self, family, model, context, vision, kv, gpu, gpus, backend, low_ram, port, data_dir, gguf_dir=None, drafter=None, mtp=None):
         s = self.s
-        models, families, contexts, _src = s.tables()
-        if gpu is not None and gpus is not None:
-            raise ToolError("give gpu (one card) or gpus (several), not both")
+        if not ryzen_policy.model_matches(family or ryzen_policy.FAMILY, model or ryzen_policy.MODEL):
+            raise ToolError(ryzen_policy.MODEL_ERROR)
+        if gpus or backend not in (None, "auto", "hip"):
+            raise ToolError(ryzen_policy.GPU_ERROR)
+        if context is not None and not 0 < context <= ryzen_policy.DEFAULT_CONTEXT:
+            raise ToolError("Context must be at most 256K tokens.")
+        if kv not in (None, ryzen_policy.KV) or vision not in (None, "no", "none"):
+            raise ToolError("This edition serves text only with a Q8 KV cache.")
+        if drafter not in (None, ryzen_policy.DRAFTER, "off") or mtp == "on":
+            raise ToolError("This edition supports DFlash2 Q4_0 drafting or drafting off.")
         if sys.version_info < (3, 10) or (WIN and sys.maxsize <= 2**32):
-            raise ToolError("this Python is too old or 32-bit: Strata's setup needs 64-bit Python 3.10+; run "
-                            + ("START-HERE.bat" if WIN else "./setup.sh") + " once instead (it installs Python)")
+            raise ToolError("Strata setup requires 64-bit Python 3.10 or newer.")
         hw = s.hardware()
+        issue = ryzen_policy.hardware_problem(hw, gpu)
+        if issue:
+            raise ToolError(issue)
         rec = s.recommend(hw)
-        if model is None and family is None:
-            if not rec.get("model"):
-                raise ToolError("no model was given and none fits this PC: " + rec["why"])
-            family, model = rec["family"], rec["model"]
-            context = context or rec["context"]
-        elif model is None:
-            sizes = s.sizes_of(models, family)
-            model = rec["model"] if rec.get("family") == family else ("IQ3_XXS" if "IQ3_XXS" in sizes and
-                                                                     hw.get("ram_gb", 0) >= 60 else sizes[0])
-        elif family is None:
-            fams = [f for f in families if model in s.sizes_of(models, f)]
-            family = "qwen" if "qwen" in fams else fams[0]
-        if family not in families:
-            raise ToolError(f"unknown family {family}; the families: {', '.join(families)}")
-        sizes = s.sizes_of(models, family)
-        if model not in sizes:
-            raise ToolError(f"{families[family]['title']} has no {model}; its sizes: {', '.join(sizes)}")
+        models, families, _contexts, _src = s.tables()
+        family, model = ryzen_policy.FAMILY, ryzen_policy.MODEL
+        context, vision, kv, backend = context or ryzen_policy.DEFAULT_CONTEXT, "no", ryzen_policy.KV, "hip"
+        drafter = drafter or ("off" if mtp == "off" else ryzen_policy.DRAFTER)
+        mtp, low_ram = None, None
         md = s.own_size(family, model) or models[model]   # Qwen3.6-35B-A3B: its sizes are not in setup's MODELS
         mac = bool(hw.get("mac"))
         if mac:                                         # a Mac: no card to pick, no KV choice, no RAM mode: unified memory decides
@@ -2684,8 +2507,7 @@ class Tools:
             args += ["--gguf-dir", str(local)]
         if backend in ("cuda", "hip", "sycl"):
             args += ["--backend", backend]
-        if drafter in ("mtp", "dflash2") and backend != "sycl" and not md.get("hy4") and not md.get("inkling"):
-            args += ["--drafter", drafter]
+        args += ["--drafter", drafter]
         if mtp in ("on", "off") and not md.get("hy4") and not md.get("inkling"):
             args += ["--mtp", mtp]
         fit = None
@@ -2769,6 +2591,10 @@ class Tools:
                 raise ToolError("an install is still running (strata_install shows its progress); start the model "
                                 "when it is done")
             cfg_path = s.find_config(model)
+            cfg = s.read_config(cfg_path)
+            issue = ryzen_policy.runtime_problem(cfg) or ryzen_policy.hardware_problem(s.hardware(), gpu if gpu is not None else cfg.get("gpu"))
+            if issue:
+                raise ToolError(issue)
             desc = s.describe_config(cfg_path)
             if not desc["ready"]:
                 raise ToolError(f"{cfg_path.name} refers to missing files ({', '.join(desc['missing_files'])}): run "
@@ -2792,7 +2618,7 @@ class Tools:
             py = s.run_python()
             if not Path(py).exists():
                 raise ToolError("Strata's Python environment (.venv) is missing: run the install again")
-            cmd = [py, str(s.root / "serve" / "server.py"), "--engine", "strata", "--config", str(cfg_path),
+            cmd = [py, str(s.src / "serve" / "server.py"), "--engine", "strata", "--config", str(cfg_path),
                    "--port", str(port)]
             if gpu is not None:
                 cmd += ["--gpu", str(gpu)]
@@ -3150,7 +2976,7 @@ def install_job(spec_path: str) -> int:
                     return 1
         cmd = [str(py), str(src / "setup.py"), *spec["args"]]
         print("strata-mcp: running " + " ".join(cmd), flush=True)
-        env = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")
+        env = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8", STRATA_INSTALL_DIR=str(root))
         if spec.get("control"):                         # the app: the installer's own mode, writing to `root`
             env.update(STRATA_CONTROL_INSTALL="1", STRATA_INSTALL_DIR=str(root), PYTHONNOUSERSITE="1")
             for key in ("PYTHONHOME", "PYTHONPATH", "VIRTUAL_ENV"):
@@ -3173,7 +2999,7 @@ def install_job(spec_path: str) -> int:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Strata's MCP server (stdio): install, start, check and stop Strata "
                                              "from an AI assistant. See docs/MCP_SERVER.md.")
-    ap.add_argument("--root", help="the Strata folder (default: the one this file is in)")
+    ap.add_argument("--root", help="the RYZENStrata run-config folder")
     ap.add_argument("--src", help="where setup.py, tools/ and serve/ are, when that is not the Strata folder (the app)")
     ap.add_argument("--install-job", help=argparse.SUPPRESS)
     a = ap.parse_args(argv)
@@ -3182,8 +3008,8 @@ def main(argv=None) -> int:
     if sys.version_info < (3, 10):
         log("Python 3.10 or newer is needed")
         return 2
-    root = Path(a.root).expanduser().resolve() if a.root else DEFAULT_ROOT
-    src = Path(a.src).expanduser().resolve() if a.src else root
+    root = Path(a.root).expanduser().resolve() if a.root else discovery.app_install_dir()
+    src = Path(a.src).expanduser().resolve() if a.src else (root if (root / "setup.py").is_file() else DEFAULT_ROOT)
     if not (src / "setup.py").is_file() or not (src / "serve" / "server.py").is_file():
         log(f"{src} is not a Strata folder (no setup.py / serve/server.py)")
         return 2

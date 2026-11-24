@@ -309,6 +309,7 @@ void prefetched_keys_are_reused(const std::string& dir) {
     };
     const size_t tok = (size_t) k::PLE_N_HEADS * k::PLE_HEAD_DIM;
     std::vector<std::vector<float>> refs(cases.size());
+    std::vector<std::vector<uint8_t>> raw_refs(cases.size());
     {
         k::PleTable mapped;
         k::PleIoOptions mio;
@@ -319,6 +320,9 @@ void prefetched_keys_are_reused(const std::string& dir) {
             const auto r = keys(cases[c].want);
             refs[c].resize(cases[c].want.size() * tok);
             CHECK(mapped.gather_batch(r.data(), cases[c].want.size(), refs[c].data(), err), "mapped gather: %s", err.c_str());
+            raw_refs[c].resize(cases[c].want.size() * k::PLE_N_HEADS * fmt->row_bytes);
+            CHECK(mapped.gather_raw_iq4nl(r.data(), cases[c].want.size(), raw_refs[c].data(), &err),
+                  "mapped raw gather: %s", err.c_str());
         }
     }
     for (uint64_t cache : {uint64_t(0), uint64_t(256)}) for (bool worker : {false, true}) {
@@ -346,6 +350,15 @@ void prefetched_keys_are_reused(const std::string& dir) {
             CHECK(refs[c].empty() || std::memcmp(out.data() + 1, refs[c].data(), refs[c].size() * sizeof(float)) == 0,
                   "%s (cache %llu worker %d): bytes differ from the mapped reader", cases[c].name, (unsigned long long) cache, (int) worker);
             CHECK(out.front() == sentinel && out.back() == sentinel, "%s: wrote outside the output", cases[c].name);
+            for (size_t i = 0; i < cases[c].pre.size(); ++i) t.prefetch_rows(pr.data() + i * k::PLE_N_HEADS);
+            const uint64_t raw_rq = requests(t);
+            std::vector<uint8_t> raw_out(raw_refs[c].size() + 2, 0xa5);
+            CHECK(t.gather_raw_iq4nl(wr.data(), cases[c].want.size(), raw_out.data() + 1, &err),
+                  "%s: direct raw gather: %s", cases[c].name, err.c_str());
+            CHECK(requests(t) - raw_rq == cases[c].extra_rows, "%s: raw gather re-requested the wrong number of rows", cases[c].name);
+            CHECK(raw_refs[c].empty() || std::memcmp(raw_out.data() + 1, raw_refs[c].data(), raw_refs[c].size()) == 0,
+                  "%s: direct raw bytes differ from the mapped reader", cases[c].name);
+            CHECK(raw_out.front() == 0xa5 && raw_out.back() == 0xa5, "%s: raw read wrote outside the output", cases[c].name);
         }
     }
     if (g_fail == 0) std::printf("ple prefetched-key reuse (reordered, duplicated, subset), Direct vs Mmap bytes: OK\n");

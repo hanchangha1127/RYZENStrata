@@ -98,7 +98,7 @@ fn session_path() -> PathBuf {
         return PathBuf::from(p);
     }
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
-    home.join(".strata").join("app-session.json")
+    home.join(".ryzenstrata").join("app-session.json")
 }
 
 pub fn write_session(s: &Session) {

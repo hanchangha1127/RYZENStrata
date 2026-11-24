@@ -12,9 +12,10 @@ import { catalogLoading, nativeAction, useNative, type NativeJob } from '../lib/
 import { completeSetup, completeSetupStep, go, newSession, openSetup, selectRemoteModel, setSettingsSection, useStore } from '../lib/store';
 import type { LocalModelFolder, SetupState } from '../lib/types';
 import { downloadCounter, engineNotReadyAfterInstall, filesHere, modelFolderLabel, onboardingError, prepareTitle, versionCardSize, type FilesHere } from '../lib/onboarding-download';
+import { sizeGb } from '../lib/format';
 import { guidedStatusText, installProgress, useDownloadEta } from '../lib/download-eta';
 import { VersionPicker } from './VersionPicker';
-import { contextIsTight, defaultContext } from '../lib/default-context';
+import { contextIsTight, defaultContext, DEFAULT_CONTEXT, RYZEN_DEFAULT_CONTEXT } from '../lib/default-context';
 import { contextCacheGb } from '../lib/native-fit';
 import { FirstRunLanguage } from './FirstRunLanguage';
 import { DownloadParts } from './DownloadParts';
@@ -27,7 +28,9 @@ function radioKeys(event: KeyboardEvent<HTMLDivElement>) { if (!['ArrowLeft', 'A
 const steps = ['Welcome', 'Your model', 'Prepare', 'Make it yours'];
 export function GuidedSetup() {
     const native = useNative(), setup = useStore(s => s.setup), hardware = useStore(s => s.hardware);
-    const families = nativeCatalogModels(native?.catalog?.families ?? []);
+    const ryzen = native?.ryzenEdition === true;
+    const hardwareError = ryzen ? native?.ryzenHardware?.error : null;
+    const families = nativeCatalogModels(native?.catalog?.families ?? [], ryzen);
     const saved = !setup?.complete && !setup?.choices?.onboarding?.manual ? setup?.choices?.onboarding : undefined;
     const [step, setStep] = useState(saved?.manual || setup?.complete ? 1 : saved?.step ?? 1);
     /* Only what the person (or an earlier visit) chose is state. Until then the start is worked out from the catalog on every render: a model already
@@ -37,11 +40,11 @@ export function GuidedSetup() {
     const start = startingChoice(families, (native?.installed?.models ?? []).filter(m => m.ready).map(m => m.model), native?.catalog?.recommendation);
     const family = chosenFamily || start?.family || native?.catalog?.recommendation?.family || families[0]?.family || '';
     const size = chosenSize || start?.size || '';
-    /* 128K for every configuration unless the person picks another, on every card. The warning for a card
-       it leaves little room on is under the chooser; nothing is lowered. */
+    // Keep the chosen context even when the available GPU memory calls for a warning.
     const topCardGb = Math.max(0, ...(native?.hardware?.gpus ?? []).filter(g => g.usable !== false).map(g => g.vram_gb));
     const [pickedContext, setContext] = useState<number | undefined>(saved?.context), [contextTouched, setContextTouched] = useState(false);
     const [vision, setVision] = useState(saved?.vision ?? true), [directory, setDirectory] = useState(saved?.directory ?? '');
+    const [ggufDir, setGgufDir] = useState(saved?.ggufDir ?? '');
     const [profile, setProfile] = useState<'work' | 'performance'>(saved?.profile ?? 'work');
     const [installJobId, setInstallJobId] = useState(saved?.installJobId ?? ''), [tuneJobId, setTuneJobId] = useState(saved?.tuneJobId ?? '');
     const [hereByVersion, setHereByVersion] = useState<Record<string, FilesHere>>({});
@@ -60,13 +63,15 @@ export function GuidedSetup() {
     const isHy4Selected = selectedFamily?.family === HY4_FAMILY || selectedFamily?.family === INKLING_FAMILY;
     const version = selectedFamily?.sizes.find(s => s.id === size) ?? selectedFamily?.sizes[0];
     const installed = native?.installed?.models.find(m => m.model === version?.id);
-    const contextList = native?.catalog?.contexts ?? [131072];
-    const context = pickedContext ?? defaultContext(contextList);
-    const installJob = native?.jobs.find(j => j.id === installJobId) ?? (step === 3 ? native?.jobs.find(j => j.kind === 'install' && j.state === 'running' && j.guided && j.model === version?.model) : undefined), tuneJob = native?.jobs.find(j => j.id === tuneJobId) ?? (step === 4 ? native?.jobs.find(j => (j.kind === 'tune' || (isHy4Selected && j.kind === 'load')) && j.state === 'running' && j.guided && j.model === version?.id) : undefined);
+    const contextTarget = ryzen ? RYZEN_DEFAULT_CONTEXT : DEFAULT_CONTEXT;
+    const contextList = native?.catalog?.contexts ?? [contextTarget];
+    const context = pickedContext !== undefined && contextList.includes(pickedContext) ? pickedContext : defaultContext(contextList, contextTarget);
+    const startDirectly = ryzen || isHy4Selected;
+    const installJob = native?.jobs.find(j => j.id === installJobId) ?? (step === 3 ? native?.jobs.find(j => j.kind === 'install' && j.state === 'running' && j.guided && j.model === version?.model) : undefined), tuneJob = native?.jobs.find(j => j.id === tuneJobId) ?? (step === 4 ? native?.jobs.find(j => (j.kind === 'tune' || (startDirectly && j.kind === 'load')) && j.state === 'running' && j.guided && j.model === version?.id) : undefined);
     const active = native?.jobs.find(j => j.state === 'running');
     const ready = native?.instances.some(i => i.model === version?.id && i.status === 'ready');
     const folder = directory || native?.downloadDirectory || native?.installed?.data_folder || setup?.app.modelsDir || '';
-    const choices: Choices = { step, family: selectedFamily?.family, size: version?.id, context, vision, directory, profile, installJobId, tuneJobId, calibrate };
+    const choices: Choices = { step, family: selectedFamily?.family, size: version?.id, context, vision, directory, ggufDir, profile, installJobId, tuneJobId, calibrate };
     function persist(next: number, patch: Partial<Choices> = {}, dismissed = false) {
         const value = { ...choices, step: next, ...patch };
         const work = writes.current.catch(() => { }).then(() => completeSetupStep(Math.min(4, next), { onboarding: value }, dismissed));
@@ -102,6 +107,10 @@ export function GuidedSetup() {
     }
     /* Files the person already has are checked and adopted by the "Use a local GGUF" page, not made the data folder (that downloaded them again, #3507). */
     async function ownModel(path?: string) {
+        if(ryzen){
+            if(path){setGgufDir(path);setFolderOpen(false);setPlan(null);setError('');}
+            return;
+        }
         await perform(async () => { leaving.current = true; if (saveTimer.current)
             clearTimeout(saveTimer.current); try {
             await persist(step, { manual: true }, true);
@@ -140,7 +149,7 @@ export function GuidedSetup() {
         saveTimer.current = setTimeout(() => { void persist(step).catch(e => setError(e.message)); }, 450);
         return () => { if (saveTimer.current)
             clearTimeout(saveTimer.current); };
-    }, [step, family, size, context, vision, directory, profile, calibrate, installJobId, tuneJobId]);
+    }, [step, family, size, context, vision, directory, ggufDir, profile, calibrate, installJobId, tuneJobId]);
     useEffect(() => {
         if (step === 3 && installJob?.state === 'done' && installed?.ready)
             void advance(4).catch(e => setError(e.message));
@@ -154,7 +163,7 @@ export function GuidedSetup() {
         setTuneJobId(tuneJob.id);
         void persist(4, { tuneJobId: tuneJob.id }).catch(e => setError(e.message));
     } }, [step, installJob?.id, tuneJob?.id]);
-    const values = { guided: true, family: version?.sourceFamily, model: version?.model, context, ...(contextTouched ? { contextChosen: true } : {}), vision: version?.images ? 'yes' : 'no', kv: 'int8', low_ram: 'auto', loadAfter: false, multiple: false, ...(directory ? { data_dir: directory } : {}) };
+    const values = { guided: true, family: version?.sourceFamily, model: version?.model, context, ...(contextTouched ? { contextChosen: true } : {}), vision: version?.images && (!ryzen || vision) ? ryzen ? 'gpu' : 'yes' : 'no', kv: 'int8', ...(ryzen ? { drafting: 'dflash2', ...(ggufDir ? { gguf_dir: ggufDir } : {}) } : {}), low_ram: 'auto', loadAfter: false, multiple: false, ...(directory ? { data_dir: directory } : {}) };
     async function review() {
         await perform(async () => {
             setInstallJobId('');
@@ -176,8 +185,8 @@ export function GuidedSetup() {
     }
     async function tune() {
         await perform(async () => {
-            const result = isHy4Selected
-                ? await nativeAction<NativeJob>('operations', { kind: 'load', args: { guided: true, model: version?.id, vision: version?.images && vision ? 'yes' : 'no', multiple: false } })
+            const result = startDirectly
+                ? await nativeAction<NativeJob>('operations', { kind: 'load', args: { guided: true, model: version?.id, vision: version?.images && vision ? ryzen ? 'gpu' : 'yes' : 'no', multiple: false } })
                 : await nativeAction<NativeJob>('operations', { kind: 'tune', args: { guided: true, model: version?.id, profile, calibrate, vision: version?.images && vision ? 'yes' : 'no', multiple: false } });
             setTuneJobId(result.id);
             await persist(4, { tuneJobId: result.id });
@@ -201,7 +210,7 @@ export function GuidedSetup() {
             setCheckingPlan(false);
         } });
         return () => { cancelled = true; };
-    }, [step, plan, preparing, native?.available, version?.id, context, directory]);
+    }, [step, plan, preparing, native?.available, version?.id, context, directory, ggufDir, vision]);
     const recommendedRows = recommendedVersions(selectedFamily?.sizes ?? [], native?.catalog?.recommendation);
     const recommendedCards = recommendedRows.map(x => x.v);
     const pickNote = (v: { id: string }) => recommendedRows.find(x => x.v.id === v.id && [PICK_NOTE, OTHER_NOTE].includes(x.r.note))?.r.note ?? '';
@@ -237,7 +246,7 @@ export function GuidedSetup() {
     const versionCard = (v: NonNullable<typeof version>) => <button key={v.id} type="button" role="radio" tabIndex={version?.id === v.id ? 0 : -1} aria-checked={version?.id === v.id} data-selected={version?.id === v.id} onClick={() => { setSize(v.id); setPlan(null); }}><span className="onboard-version-top"><span className="onboard-version-copy"><strong>{tr(catalogVersionLabel(v))}</strong><small>{tr(v.model)}{tr(pickNote(v) ? <> · {tr(pickNote(v))}</> : null)}</small></span><span className="onboard-version-radio">{tr(version?.id === v.id ? <Icon name="check" size={12}/> : null)}</span></span><span className="onboard-version-bottom"><span className="onboard-version-size" data-here={cardSize(v).kind === 'here' ? 'true' : undefined}>{tr(cardSize(v).kind === 'here' ? <><Icon name="check" size={15}/>{tr(cardSize(v).text)}</> : <><Icon name="download" size={15}/>{tr((cardSize(v).value ?? v.download_gb).toFixed(1))} <small>{tr("GB")}</small></>)}</span><span className="onboard-version-fit">{tr(v.on_this_pc === 'does not fit' || v.on_this_pc === 'tight' || v.on_this_pc?.includes('slower') || v.on_this_pc?.startsWith('experimental:') ? <><Icon name="clock" size={13}/>{tr("May run slower")}</> : cardSize(v).kind === 'here' ? null : cardSize(v).kind === 'left' ? <>{tr("Left to download")}</> : v.installed ? <><Icon name="check" size={13}/>{tr("On this computer")}</> : <>{tr("Download size")}</>)}</span></span></button>;
     const here = filesHere(plan?.plan), counter = downloadCounter(plan?.plan?.download_gb ?? version?.download_gb, progress, preparing, here);
     const eta = useDownloadEta(preparing ? progress : undefined, installJob?.id);
-    const title = step === 1 ? 'State of the art. At home.' : step === 2 ? 'Select the model you want to run.' : step === 3 ? prepareTitle(preparing, progress, here) : tuneJob?.state === 'running' ? (isHy4Selected ? 'Loading your model.' : 'A little tuning. A better fit.') : isHy4Selected ? 'Ready to start chatting.' : 'How you would like to work with Strata?';
+    const title = step === 1 ? 'State of the art. At home.' : step === 2 ? (ryzen ? 'Prepare your Q2_0 model.' : 'Select the model you want to run.') : step === 3 ? prepareTitle(preparing, progress, here) : tuneJob?.state === 'running' ? (startDirectly ? 'Loading your model.' : 'A little tuning. A better fit.') : startDirectly ? 'Ready to start chatting.' : 'How you would like to work with Strata?';
     function changeDownloadFolder() { void perform(async () => { await advance(2); setFolderOpen(true); }); }
     return <div className="setup guided-onboarding" data-step={step}>
   <header className="onboard-header"><Brand variant="lockup" height={22}/>{tr(step === 1 ? <FirstRunLanguage/> : null)}{tr(step !== 1 ? <button className="onboard-later" disabled={pending} onClick={() => void skip(false)}>{tr("Finish later")}<Icon name="chevron" size={13}/></button> : null)}</header>
@@ -247,17 +256,20 @@ export function GuidedSetup() {
    <div className="onboard-welcome-copy"><h1 ref={titleRef} tabIndex={-1} data-initial-focus>{tr(title)}</h1><p>{tr("Get stuff done on hardware you own.")}<br />{tr("Use intelligence the way you want.")}</p><div className="onboard-benefits"><span><Icon name="shield" size={17}/>{tr("Privacy first")}</span><span><Icon name="bolt" size={17}/>{tr("Fastest AI")}</span><span><Icon name="check" size={17}/>{tr("Easy to use")}</span></div></div>
    <footer className="onboard-footer onboard-footer--welcome"><Btn variant="primary" disabled={pending || !native} onClick={() => void perform(() => advance(2))}>{tr("Let\u2019s get started")}<Icon name="chevron" size={16}/></Btn><small>{tr("Already know your way around? ")}<button disabled={pending} onClick={() => void skip(true)}>{tr("Go straight to the app")}</button></small></footer>
   </> : <>
-   <div className="onboard-stage-heading"><h1 ref={titleRef} tabIndex={-1} data-initial-focus>{tr(title)}</h1>{tr(step === 2 ? <p>{tr("You can always change your models later.")}</p> : step === 4 && tuneJob?.state === 'running' ? <p>{tr("We\u2019re measuring, applying your preference, and getting ready to chat.")}</p> : null)}</div>
+   <div className="onboard-stage-heading"><h1 ref={titleRef} tabIndex={-1} data-initial-focus>{tr(title)}</h1>{tr(step === 2 && !ryzen ? <p>{tr("You can always change your models later.")}</p> : step === 4 && tuneJob?.state === 'running' ? <p>{tr("We\u2019re measuring, applying your preference, and getting ready to chat.")}</p> : null)}</div>
    {tr(step === 2 ? <div className="onboard-model-stage">
     {tr(selectedFamily ? <>
-     <div className="onboard-model-top"><div className="onboard-model-picker"><span className="onboard-control-label">{tr("Model")}</span><div><span className="onboard-model-symbol"><Icon name="models" size={23}/></span><Select ariaLabel={tr("Setup model")} value={selectedFamily.family} options={families.map(f => ({ value: f.family, label: f.title }))} onChange={value => chooseNative(value, '')}/></div></div><div className="onboard-context"><span className="onboard-control-label">{tr("Conversation context")}</span><Select ariaLabel={tr("Setup conversation context")} value={String(context)} options={contextList.map(n => ({ value: String(n), label: `${n / 1024}K` }))} onChange={value => { setContextTouched(true); setContext(Number(value)); }}/></div></div>
+     <div className="onboard-model-top"><div className="onboard-model-picker"><span className="onboard-control-label">{tr("Model")}</span><div><span className="onboard-model-symbol"><Icon name="models" size={23}/></span>{ryzen ? <strong>ISTA-DASLab Qwen3.8-Flash-Next Q2_0</strong> : <Select ariaLabel={tr("Setup model")} value={selectedFamily.family} options={families.map(f => ({ value: f.family, label: f.title }))} onChange={value => chooseNative(value, '')}/> }</div></div><div className="onboard-context"><span className="onboard-control-label">{tr("Conversation context")}</span><Select ariaLabel={tr("Setup conversation context")} value={String(context)} options={contextList.map(n => ({ value: String(n), label: `${n / 1024}K` }))} onChange={value => { setContextTouched(true); setContext(Number(value)); }}/></div></div>
+     {hardwareError ? <ErrorNotice message={hardwareError}/> : null}
+     {ryzen && native?.ryzenHardware?.warning ? <p className="small muted">{tr(native.ryzenHardware.warning)}</p> : null}
+     {ryzen ? <p className="small muted">{[tr("Context memory"), "Q8", "· Flash Attention · SSD N-gram · DFlash2 Q4_0"].join(" ")}</p> : null}
      {tr(contextIsTight(topCardGb, context, 'int8', version?.context_fit) ? <p className="small muted native-spill-note"><Icon name="warning" size={16}/>{tr("This much context takes about {0} GB of graphics memory and leaves little room for the model on this card. Strata will try it; if it does not start, choose a shorter context.", [contextCacheGb(context, 'int8', version?.context_fit).toFixed(1)])}</p> : null)}
      <OnboardingMemory hardware={hardware} native={native?.hardware}/>{tr(!version || version.needsNewerEngine ? <p className="small muted">{tr("This model needs a newer engine. Update your engine or import a local GGUF for this model.")}</p> : null)}
-     <div className="onboard-version-heading"><strong>{tr("Choose a version")}</strong><span>{tr(version ? `${catalogVersionLabel(version)} selected` : '')}</span></div>
-     <div className="onboard-versions" role="radiogroup" aria-label={tr("Model version")} onKeyDown={radioKeys}>{tr(cards.map(v => versionCard(v)))}</div>
+     {!ryzen ? <div className="onboard-version-heading"><strong>{tr("Choose a version")}</strong><span>{tr(version ? `${catalogVersionLabel(version)} selected` : '')}</span></div> : null}
+     {ryzen ? <p className="small muted">{version ? cardSize(version).kind === 'here' ? tr("On this computer") : tr("{0} download", [sizeGb(cardSize(version).value ?? version.download_gb)]) : null}</p> : <div className="onboard-versions" role="radiogroup" aria-label={tr("Model version")} onKeyDown={radioKeys}>{tr(cards.map(v => versionCard(v)))}</div>}
      {tr(others.length ? <div className="onboard-more-versions"><VersionPicker versions={others} selectedId={version?.id ?? ''} hardware={hardware ? { ram_gb: native?.hardware?.ram_gb ?? hardware.memory.totalGb, vram_gb: cardRoomGb((native?.hardware?.gpus ?? []).filter(g => g.usable !== false)) } : null} downloaded={readyIds} showRecommended={false} moreLabel="More versions" onSelect={id => { setSize(id); setPlan(null); }} onOwnGguf={() => void ownModel()}/></div> : null)}
-     <div className="onboard-folder"><Icon name="folder" size={20}/><div><strong>{tr(directory ? 'Your model folder' : 'Already downloaded the model?')}</strong><small>{tr(directory || "Choose the folder and we'll start your models with Strata.")}</small></div><Btn size="sm" onClick={() => setFolderOpen(v => !v)}>{tr(folderOpen ? 'Close' : directory ? 'Change' : 'Choose folder')}</Btn></div>
-     {tr(folderOpen ? <OnboardingFolder directory={folder} onChoose={(path, ggufFiles) => ggufFiles > 0 && !/strata/i.test(path.split(/[\\/]/).filter(Boolean).pop() ?? '') ? void ownModel(path) : void perform(async () => { await nativeAction('directory', { directory: path }); setDirectory(path); setFolderOpen(false); setPlan(null); })}/> : null)}
+     <div className="onboard-folder"><Icon name="folder" size={20}/><div><strong>{tr(ggufDir ? 'Local Q2_0 files' : directory ? 'Your model folder' : 'Already downloaded the model?')}</strong><small>{tr(ggufDir || directory || (ryzen ? "Choose the folder containing both ISTA-DASLab Q2_0 GGUF files." : "Choose the folder and we'll start your models with Strata."))}</small></div><Btn size="sm" onClick={() => setFolderOpen(v => !v)}>{tr(folderOpen ? 'Close' : (directory || ggufDir) ? 'Change' : 'Choose folder')}</Btn></div>
+     {tr(folderOpen ? <OnboardingFolder directory={folder} onChoose={(path, ggufFiles) => ggufFiles > 0 && (ryzen || !/strata/i.test(path.split(/[\\/]/).filter(Boolean).pop() ?? '')) ? void ownModel(path) : void perform(async () => { await nativeAction('directory', { directory: path }); setDirectory(path); setGgufDir(''); setFolderOpen(false); setPlan(null); })}/> : null)}
     </> : catalogLoading(native) ? <div className="onboard-engine-connect" role="status" aria-live="polite" data-loading="true"><Icon name="gauge" size={24}/><strong>{tr("Checking what your computer can run…")}</strong><small className="muted">{readingSlow ? tr("Still checking. On the first start this can take up to a minute.") : tr("This takes a few seconds.")}</small><div className="onboard-progress" data-indeterminate><span /></div></div> : <div className="onboard-engine-connect"><Icon name="models" size={24}/><strong>{tr("Connect your Strata installation")}</strong><Btn onClick={() => void skip(false, 'Engine')}>{tr("Connect engine")}</Btn></div>)}
    </div> : step === 3 ? <div className="onboard-prepare-stage">
     <section className="onboard-download"><EngineWarning native={native} family={selectedFamily?.family}/><div className="onboard-download-identity"><Icon name="models" size={19}/><strong>{tr(selectedFamily?.title)}</strong><span>{tr(version ? catalogVersionLabel(version) : '')}</span><small>{tr(version?.model)}</small></div><OnboardingArt kind="download" progress={progress?.percent ?? 0} counter={counter}/><div className="onboard-download-info">
@@ -265,16 +277,16 @@ export function GuidedSetup() {
      <small className="onboard-download-location" title={tr(folder)}><Icon name="folder" size={16}/><span><span>{tr("Save to")}</span><strong>{tr(modelFolderLabel(folder))}</strong></span>{tr(!preparing ? <button type="button" onClick={changeDownloadFolder}>{tr("Change")}</button> : null)}</small>
     </div></section><OnboardingTour page={tour} onChange={setTour}/>
    </div> : <div className="onboard-tune-stage">
-    {tr(tuneJob?.state === 'running' ? <><OnboardingArt kind="tune"/><div className="onboard-tuning-status" aria-live="polite"><span className="onboard-pulse-dot"/><strong>{tr(tuneJob.summary)}</strong>{tr(tuneJob.details ? <small className="onboard-tuning-details">{tuneJob.details}</small> : null)}{tr(!isHy4Selected ? <small>{tr("Your choice: ")}{tr(profile === 'work' ? '20% headroom for other work' : 'Full performance')}</small> : null)}<div className="onboard-progress" data-indeterminate><span /></div><button disabled={pending} onClick={() => void perform(async () => { await nativeAction(`operations/${tuneJob.id}/cancel`); })}>{tr(isHy4Selected ? 'Stop loading' : 'Stop tuning')}</button></div><OnboardingTour page={tour} onChange={setTour}/></> : <>
-     {tr(!isHy4Selected ? <><OnboardingResources profile={profile}/>
+    {tr(tuneJob?.state === 'running' ? <><OnboardingArt kind="tune"/><div className="onboard-tuning-status" aria-live="polite"><span className="onboard-pulse-dot"/><strong>{tr(tuneJob.summary)}</strong>{tr(tuneJob.details ? <small className="onboard-tuning-details">{tuneJob.details}</small> : null)}{tr(!startDirectly ? <small>{tr("Your choice: ")}{tr(profile === 'work' ? '20% headroom for other work' : 'Full performance')}</small> : null)}<div className="onboard-progress" data-indeterminate><span /></div><button disabled={pending} onClick={() => void perform(async () => { await nativeAction(`operations/${tuneJob.id}/cancel`); })}>{tr(startDirectly ? 'Stop loading' : 'Stop tuning')}</button></div><OnboardingTour page={tour} onChange={setTour}/></> : <>
+     {tr(!startDirectly ? <><OnboardingResources profile={profile}/>
      <div className="onboard-resource-options" role="radiogroup" aria-label={tr("Computer resource preference")} onKeyDown={radioKeys}>{tr(([{ id: 'work', icon: 'computer', title: 'Leave room for my work', hint: 'Keeps 5-8 GB of memory free for other programs.', badge: 'Everyday choice' }, { id: 'performance', icon: 'bolt', title: 'Use full performance', hint: 'Focus this computer on your AI.', badge: '100% priority' }] as const).map(option => <button key={option.id} role="radio" tabIndex={profile === option.id ? 0 : -1} aria-checked={profile === option.id} data-selected={profile === option.id} onClick={() => setProfile(option.id)}><span className="onboard-resource-option-top"><span className="onboard-resource-option-icon"><Icon name={option.icon} size={22}/></span><span className="onboard-version-radio">{tr(profile === option.id ? <Icon name="check" size={12}/> : null)}</span></span><strong>{tr(option.title)}</strong><p>{tr(option.hint)}</p><small>{tr(option.badge)}</small></button>))}</div>
      <details className="onboard-resource-honesty"><summary>{tr("How resource sharing works")}</summary><p>{tr("We reserve GPU memory and limit CPU expert workers to leave headroom for other apps. Actual usage varies with your model. Model RAM requirements and system safety reserves still apply.")}</p></details></> : null)}
      {tr(version?.images ? <label className="onboard-picture onboard-load-vision"><OnboardingCheckbox checked={vision} onChange={setVision}/><Icon name="image" size={20}/><span><strong>{tr("Read pictures when this model loads")}</strong><small>{tr("Understand photos and screenshots. Vision files are already downloaded.")}</small></span></label> : null)}
-     {tr(!isHy4Selected ? (native?.capabilities.calibration ? <label className="onboard-calibration"><OnboardingCheckbox checked={calibrate} onChange={setCalibrate}/><Icon name="gauge" size={20}/><span><strong>{tr("Find the fastest settings for this PC")}</strong><small>{tr("One-time measurement \u00B7 about 5\u201310 minutes. Your computer will be busy.")}</small></span></label> : <p className="onboard-calibration-note">{tr("We\u2019ll apply your preference and run a short speed check.")}</p>) : null)}
-     {tr(tuneJob && ['error', 'cancelled'].includes(tuneJob.state) ? <ErrorNotice message={tuneJob.error ?? (isHy4Selected ? 'Loading stopped. Your model files are safe.' : 'Tuning stopped. Your model files are safe.')} next={tr(isHy4Selected ? 'Try again.' : 'Try again, or turn off the longer measurement above.')}/> : null)}
+     {tr(!startDirectly ? (native?.capabilities.calibration ? <label className="onboard-calibration"><OnboardingCheckbox checked={calibrate} onChange={setCalibrate}/><Icon name="gauge" size={20}/><span><strong>{tr("Find the fastest settings for this PC")}</strong><small>{tr("One-time measurement \u00B7 about 5\u201310 minutes. Your computer will be busy.")}</small></span></label> : <p className="onboard-calibration-note">{tr("We\u2019ll apply your preference and run a short speed check.")}</p>) : null)}
+     {tr(tuneJob && ['error', 'cancelled'].includes(tuneJob.state) ? <ErrorNotice message={tuneJob.error ?? (startDirectly ? 'Loading stopped. Your model files are safe.' : 'Tuning stopped. Your model files are safe.')} next={tr(startDirectly ? 'Try again.' : 'Try again, or turn off the longer measurement above.')}/> : null)}
     </>)}
    </div>)}
-   <footer className="onboard-footer"><Btn variant="ghost" disabled={pending || !!active} onClick={() => void perform(() => advance(step === 4 ? 2 : step - 1))}>{tr("Back")}</Btn>{tr(step === 3 ? <span>{tr(preparing ? 'Take a look around while we prepare.' : here.complete ? 'Strata checks the files first.' : 'Downloads start only when you’re ready.')}</span> : step === 4 && tuneJob?.state === 'running' ? <span>{tr("We\u2019ll open chat when your model is ready.")}</span> : null)}{tr(step === 2 ? <Btn variant="primary" disabled={pending || !!active || !version || !!version.needsNewerEngine || !native?.available || folderOpen} onClick={() => void review()}>{tr(pending ? 'Checking…' : 'Continue')}<Icon name="chevron" size={15}/></Btn> : step === 3 ? <Btn variant="primary" disabled={pending || checkingPlan || !!active || !!plan?.plan?.disk_short || !version || !!version.needsNewerEngine} onClick={() => void download()}>{tr(preparing ? 'Preparing…' : checkingPlan ? 'Checking storage…' : pending ? 'Starting…' : here.complete ? 'Continue' : stopped ? 'Resume download' : 'Download model')}{tr(!preparing && !here.complete ? <Icon name="download" size={16}/> : null)}</Btn> : <Btn variant="primary" disabled={pending || !!active || !installed?.ready} onClick={() => void tune()}>{tr(isHy4Selected ? (tuneJob?.state === 'running' ? 'Loading…' : pending ? 'Starting…' : 'Start chatting') : (tuneJob?.state === 'running' ? 'Tuning…' : pending ? 'Starting…' : 'Tune & start chatting'))}<Icon name="chevron" size={15}/></Btn>)}</footer>
+   <footer className="onboard-footer"><Btn variant="ghost" disabled={pending || !!active} onClick={() => void perform(() => advance(step === 4 ? 2 : step - 1))}>{tr("Back")}</Btn>{tr(step === 3 ? <span>{tr(preparing ? 'Take a look around while we prepare.' : here.complete ? 'Strata checks the files first.' : 'Downloads start only when you’re ready.')}</span> : step === 4 && tuneJob?.state === 'running' ? <span>{tr("We\u2019ll open chat when your model is ready.")}</span> : null)}{tr(step === 2 ? <Btn variant="primary" disabled={pending || !!active || !!hardwareError || !version || !!version.needsNewerEngine || !native?.available || folderOpen} onClick={() => void review()}>{tr(pending ? 'Checking…' : 'Continue')}<Icon name="chevron" size={15}/></Btn> : step === 3 ? <Btn variant="primary" disabled={pending || checkingPlan || !!active || !!plan?.plan?.disk_short || !version || !!version.needsNewerEngine} onClick={() => void download()}>{tr(preparing ? 'Preparing…' : checkingPlan ? 'Checking storage…' : pending ? 'Starting…' : here.complete ? 'Continue' : stopped ? 'Resume download' : 'Download model')}{tr(!preparing && !here.complete ? <Icon name="download" size={16}/> : null)}</Btn> : <Btn variant="primary" disabled={pending || !!active || !installed?.ready} onClick={() => void tune()}>{tr(startDirectly ? (tuneJob?.state === 'running' ? 'Loading…' : pending ? 'Starting…' : 'Start chatting') : (tuneJob?.state === 'running' ? 'Tuning…' : pending ? 'Starting…' : 'Tune & start chatting'))}<Icon name="chevron" size={15}/></Btn>)}</footer>
    {tr(step === 4 && ready && ['error', 'cancelled'].includes(tuneJob?.state ?? '') ? <button className="onboard-continue-anyway" onClick={() => void finish()}>{tr("Continue to chat without a speed result")}</button> : null)}
   </>)}
   {tr(error ? <div className="onboard-error"><OnboardingError message={error} onFolder={changeDownloadFolder}/></div> : null)}

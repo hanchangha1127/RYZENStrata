@@ -152,3 +152,28 @@ test('GuidedSetup keeps a version the person already chose over the computed sta
  const chosen=await selectedStart(['iq3_s'],'IQ3_S',{step:2,manual:false,family:'qwen3.8',size:'swift-iq2_xs'});
  assert.equal(chosen.length,1);assert.match(chosen[0],/IQ2_XS/);
 });
+
+test('Ryzen onboarding and Models offer Q2_0 and open at 256K',async()=>{
+ const m=await load();
+ const catalog={
+  ...catalogs['no recommendation'],
+  edition:'ryzen',
+  contexts:[32768,131072,262144],
+  families:[
+   {family:'qwen',title:'Qwen3.8-Flash-Next',sizes:[sizeRow('q2_0','Q2_0'),sizeRow('iq3_s','IQ3_S')]},
+   {family:'swift',title:'Swift',sizes:[sizeRow('swift-iq2_xs','IQ2_XS')]},
+  ],
+ };
+ globalThis.__native={...base,ryzenEdition:true,catalog};
+ globalThis.__store={...store(),setup:{complete:false,choices:{onboarding:{step:2}},app:{modelsDir:''}}};
+ globalThis.__kept={'models.expert':true};
+ try{
+  for(const component of ['GuidedSetup','NativeModels']){
+   const html=m.renderToString(m.createElement(m[component]));
+   assert.match(html,/ISTA-DASLab Qwen3\.8-Flash-Next Q2_0/);
+   assert.match(html,/256K/);
+   assert.match(html,/Context memory Q8.*Flash Attention.*SSD N-gram/);
+   assert.doesNotMatch(html,/IQ3_S|Swift|Other local models|Image encoder device|Run multiple models|Low-RAM mode/);
+  }
+ }finally{globalThis.__kept={};}
+});

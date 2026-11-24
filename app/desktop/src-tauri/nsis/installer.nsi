@@ -174,13 +174,13 @@ VIAddVersionKey "ProductVersion" "${VERSION}"
 !define MUI_TEXTCOLOR "171B1E"
 !define MUI_INSTFILESPAGE_PROGRESSBAR "smooth"
 !define MUI_WELCOMEPAGE_TITLE "State of the art. At home."
-!define MUI_WELCOMEPAGE_TEXT "Strata runs AI on your own computer.$\r$\n$\r$\nThis takes about a minute and needs no administrator. You choose your first model inside Strata."
-!define MUI_FINISHPAGE_TITLE "Strata is ready."
+!define MUI_WELCOMEPAGE_TEXT "RYZENStrata runs AI on your own computer.$\r$\n$\r$\nThis takes about a minute and needs no administrator. You choose your first model inside Strata."
+!define MUI_FINISHPAGE_TITLE "RYZENStrata is ready."
 !define MUI_FINISHPAGE_TEXT "Open it to pick your first model. Strata downloads it for you and gets it ready."
-!define MUI_FINISHPAGE_RUN_TEXT "Open Strata"
-!define MUI_PAGE_HEADER_TEXT "Installing Strata"
+!define MUI_FINISHPAGE_RUN_TEXT "Open RYZENStrata"
+!define MUI_PAGE_HEADER_TEXT "Installing RYZENStrata"
 !define MUI_PAGE_HEADER_SUBTEXT "Copying the app. You can keep working meanwhile."
-BrandingText "Strata"
+BrandingText "RYZENStrata"
 ShowInstDetails nevershow
 
 ; Installer pages, must be ordered as they appear
@@ -423,7 +423,7 @@ Function PageLeaveReinstall
 FunctionEnd
 
 ; 5. Choose install directory page. The app is installed for this user only (no administrator), so the folder must be one the
-; user can write to: another drive (D:\Strata) or a folder in the profile, not Program Files. An update (passive: the app's own
+; user can write to: another drive (D:\RYZENStrata) or a folder in the profile, not Program Files. An update (passive: the app's own
 ; updater) and a silent install skip it and keep the earlier folder (RestorePreviousInstallLocation).
 !ifdef MUI_PAGE_HEADER_TEXT
   !undef MUI_PAGE_HEADER_TEXT
@@ -454,7 +454,7 @@ Var AppStartMenuFolder
 !ifdef MUI_PAGE_HEADER_SUBTEXT
   !undef MUI_PAGE_HEADER_SUBTEXT
 !endif
-!define MUI_PAGE_HEADER_TEXT "Installing Strata"
+!define MUI_PAGE_HEADER_TEXT "Installing RYZENStrata"
 !define MUI_PAGE_HEADER_SUBTEXT "Copying the app. You can keep working meanwhile."
 !insertmacro MUI_PAGE_INSTFILES
 
@@ -484,7 +484,7 @@ Var DeleteAppDataCheckboxState
 !define MUI_PAGE_CUSTOMFUNCTION_PRE un.SkipIfPassive
 !insertmacro MUI_UNPAGE_CONFIRM
 
-; 2. "Also remove my Strata data": unticked by default, and it says exactly what it deletes. Skipped when updating or in passive mode
+; 2. "Also remove my RYZENStrata data": unticked by default, and it says exactly what it deletes. Skipped when updating or in passive mode
 ;    (an update never deletes anything). Model folders the person chose themselves are never touched.
 UninstPage custom un.DataPage un.DataPageLeave
 Function un.DataPage
@@ -492,13 +492,13 @@ Function un.DataPage
   ${OrIf} $UpdateMode = 1
     Abort
   ${EndIf}
-  !insertmacro MUI_HEADER_TEXT "Remove your Strata data too?" "Your models, chats and settings stay on this PC unless you tick the box."
+  !insertmacro MUI_HEADER_TEXT "Remove your RYZENStrata data too?" "Your models, chats and settings stay on this PC unless you tick the box."
   nsDialogs::Create 1018
   Pop $0
   ${IfThen} $(^RTL) = 1 ${|} nsDialogs::SetRTL $(^RTL) ${|}
-  ${NSD_CreateCheckBox} 0 0 100% 12u "Also remove my Strata data (models, chats, settings)"
+  ${NSD_CreateCheckBox} 0 0 100% 12u "Also remove my RYZENStrata data (models, chats, settings)"
   Pop $DeleteAppDataCheckbox
-  ${NSD_CreateLabel} 12u 18u -12u 96u "If you tick it, these folders are deleted, and nothing else:$\r$\n$\r$\n$LOCALAPPDATA\Strata   (engine, installed copy, tunings)$\r$\n$APPDATA\Strata   (settings)$\r$\n$PROFILE\.strata   (your chats, app settings)$\r$\n$DOCUMENTS\Strata\Models   (models Strata downloaded into its own folder)$\r$\n$\r$\nA model folder you chose yourself is never deleted."
+  ${NSD_CreateLabel} 12u 18u -12u 96u "If you tick it, these folders are deleted, and nothing else:$\r$\n$\r$\n$LOCALAPPDATA\RYZENStrata   (engine, installed copy, tunings)$\r$\n$APPDATA\RYZENStrata   (settings)$\r$\n$PROFILE\.ryzenstrata   (your chats, app settings)$\r$\n$DOCUMENTS\RYZENStrata\Models   (models Strata downloaded into its own folder)$\r$\n$\r$\nA model folder you chose yourself is never deleted."
   Pop $0
   ${NSD_SetFocus} $DeleteAppDataCheckbox
   nsDialogs::Show
@@ -687,12 +687,12 @@ Section WebView2
 SectionEnd
 
 ; STRATA-MIGRATE-BEGIN
-; An earlier build installed the app into %LOCALAPPDATA%\Strata, the folder that also holds the user's data (components, install,
+; An earlier build installed the app into %LOCALAPPDATA%\RYZENStrata, the folder that also holds the user's data (components, install,
 ; procs, runtime, time-skip). Remove only the app files that build put there; everything else stays.
 !macro StrataMigrateOldInstall OLDDIR NEWDIR
   StrCmp "${OLDDIR}" "${NEWDIR}" +8
-  IfFileExists "${OLDDIR}\strata-desktop.exe" 0 +7
-    Delete "${OLDDIR}\strata-desktop.exe"
+  IfFileExists "${OLDDIR}\ryzenstrata-desktop.exe" 0 +7
+    Delete "${OLDDIR}\ryzenstrata-desktop.exe"
     Delete "${OLDDIR}\uninstall.exe"
     RMDir /r "${OLDDIR}\host"
     RMDir /r "${OLDDIR}\node"
@@ -984,17 +984,17 @@ Section Uninstall
 
     ; Strata's own data, for a fresh start: the folders listed on the page, nothing else. Each path is checked first.
     ${If} "$LOCALAPPDATA" != ""
-      RmDir /r "$LOCALAPPDATA\Strata"
+      RmDir /r "$LOCALAPPDATA\RYZENStrata"
     ${EndIf}
     ${If} "$APPDATA" != ""
-      RmDir /r "$APPDATA\Strata"
+      RmDir /r "$APPDATA\RYZENStrata"
     ${EndIf}
     ${If} "$PROFILE" != ""
-      RmDir /r "$PROFILE\.strata"
+      RmDir /r "$PROFILE\.ryzenstrata"
     ${EndIf}
     ${If} "$DOCUMENTS" != ""
-      RmDir /r "$DOCUMENTS\Strata\Models"
-      RmDir "$DOCUMENTS\Strata"          ; only if it is empty now
+      RmDir /r "$DOCUMENTS\RYZENStrata\Models"
+      RmDir "$DOCUMENTS\RYZENStrata"          ; only if it is empty now
     ${EndIf}
   ${EndIf}
 
@@ -1040,7 +1040,7 @@ FunctionEnd
 Function RestorePreviousInstallLocation
   ReadRegStr $4 SHCTX "${MANUPRODUCTKEY}" ""
   StrCmp $4 "" restore_done 0
-  ; %LOCALAPPDATA%\Strata holds the user's engines, model configs and tuning: never an app folder
+  ; %LOCALAPPDATA%\RYZENStrata holds the user's engines, model configs and tuning: never an app folder
   StrCmp $4 "$LOCALAPPDATA\${PRODUCTNAME}" restore_done 0
   Push $4
   Push "$LOCALAPPDATA\Temp"

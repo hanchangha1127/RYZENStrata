@@ -180,6 +180,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <winioctl.h>
 #include <psapi.h>
 #include <tlhelp32.h>
 #include <dbghelp.h>
@@ -757,7 +758,13 @@ struct Options {
     std::string pack = "pack/full";
     std::vector<int64_t> tokens;      // the prompt, PRE-TOKENIZED
     int64_t max_new = 16;
+#if defined(STRATA_RYZEN_PROFILE)
+    bool gpu_experts_only = true;
+    int64_t max_context = 262144;
+#else
+    bool gpu_experts_only = false;
     int64_t max_context = 4096;
+#endif
     bool greedy = true;
     uint64_t seed = 0;
     int top_k = 20;
@@ -821,7 +828,7 @@ struct Options {
     int ple_inflight = 256;   // the prompt path reads a chunk's rows at once: 64 left the SSD half idle (32K: 303 -> 189 ms)
     double ple_delay_us = 0;           ///< fault injection: every row read completes no earlier than this
     bool ple_sync_submit = false;      ///< A/B arm: submit reads on the token thread, no I/O worker
-    std::string kv = "fp16";           ///< plan v0.3 P7: KV storage, fp16 (default) or int8 (half the VRAM)
+    std::string kv = gpu_experts_only ? "int8" : "fp16";
     int64_t kv_resident = 0;           ///< KV streaming: resident cells per QSA layer (0: all in VRAM)
     bool kv_grow = false;              ///< the elastic K/V (--kv-grow, STRATA_KV_GROW=1; kvg_ensure)
     std::string dump_residual;
@@ -969,7 +976,7 @@ struct Options {
     /// A card that drives no display needs less than the one the monitors are on.
     int vram_reserve_later_mib = -1;
     /// Plan v0.3 P5: batched prompt processing in chunks of this many tokens (0 = the token path).
-    int64_t prefill_chunk = 0;
+    int64_t prefill_chunk = gpu_experts_only ? 2048 : 0;
     /// `--prefill auto`: the largest chunk (up to 8192) whose buffers the expert cache can lend.  A chunk of
     /// stream_all_min tokens or more (1024 by default) streams every expert the GPU does not hold once, routed or not
     /// (a smaller one only the experts it routes to), so a bigger chunk streams fewer bytes per token (the "ubatch"
@@ -1013,7 +1020,7 @@ struct Options {
 #if defined(STRATA_GPU_METAL)
     int spec = 2;   // Metal: a window of 2 by default (measured best on the M5 Max; an explicit --spec wins)
 #else
-    int spec = 0;
+    int spec = gpu_experts_only ? 4 : 0;
 #endif
     /// --serve runs up to this many sequences at once, one token each per batch window (0 = off).  A request
     /// sent as `BGEN <slot> <max_new> ...` reads its prompt and its first token through the usual path, then
@@ -1206,6 +1213,9 @@ struct Options {
 };
 
 void usage() {
+#if defined(STRATA_RYZEN_PROFILE)
+    std::fprintf(stderr, "  --gpu-experts-only   run the Ryzen GPU-only profile (enabled by default)\n");
+#endif
     std::fprintf(stderr,
                  "strata generate --pack DIR --tokens \"1,2,3\" [options]\n"
                  "\n"
@@ -1837,6 +1847,33 @@ std::string stage_text() {
     return s;
 }
 
+#if defined(_WIN32)
+int on_rotational_disk(const std::string& path, std::string& dev) {
+    std::error_code ec;
+    const auto absolute = std::filesystem::absolute(std::filesystem::u8path(path), ec);
+    if (ec) return -1;
+    wchar_t root[MAX_PATH] = {}, volume[MAX_PATH] = {};
+    if (!GetVolumePathNameW(absolute.c_str(), root, MAX_PATH) ||
+        !GetVolumeNameForVolumeMountPointW(root, volume, MAX_PATH)) return -1;
+    std::wstring name(volume);
+    if (!name.empty() && name.back() == L'\\') name.pop_back();
+    const HANDLE handle = CreateFileW(name.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                                      OPEN_EXISTING, 0, nullptr);
+    if (handle == INVALID_HANDLE_VALUE) return -1;
+    STORAGE_PROPERTY_QUERY query{};
+    query.PropertyId = StorageDeviceSeekPenaltyProperty;
+    query.QueryType = PropertyStandardQuery;
+    DEVICE_SEEK_PENALTY_DESCRIPTOR result{};
+    DWORD returned = 0;
+    const BOOL ok = DeviceIoControl(handle, IOCTL_STORAGE_QUERY_PROPERTY, &query, sizeof query,
+                                    &result, sizeof result, &returned, nullptr);
+    CloseHandle(handle);
+    if (!ok || returned < sizeof result) return -1;
+    const auto label = std::filesystem::path(root).u8string();
+    dev.assign(label.begin(), label.end());
+    return result.IncursSeekPenalty ? 1 : 0;
+}
+#endif
 #if !defined(_WIN32)
 // #605: whether `path` is on a rotational disk (1), not (0) or unknown (-1), from sysfs; `dev` is the disk's name
 int on_rotational_disk(const std::string& path, std::string& dev) {
@@ -3929,6 +3966,7 @@ int main(int argc, char** argv) {
         else if (a == "--native-dense-gguf") o.native_dense_gguf.push_back(next("--native-dense-gguf"));
         else if (a == "--no-capture") o.no_capture = true;
         else if (a == "--no-pool") o.no_pool = true;
+        else if (a == "--gpu-experts-only" && o.gpu_experts_only) continue;
         else if (a == "--sync-every-layer") o.sync_every_layer = true;
         else if (a == "--stage-timing") o.stage_timing = true;
         else if (a == "--graph-only") o.graph_only = true;
@@ -4273,6 +4311,39 @@ int main(int argc, char** argv) {
             return 2;
         }
         }
+    }
+    if (o.gpu_experts_only) {
+        const bool remote = std::any_of(o.expert_cache_remote.begin(), o.expert_cache_remote.end(),
+                                       [](int64_t n) { return n > 0; }) ||
+                            std::any_of(o.expert_cache_remote_auto.begin(), o.expert_cache_remote_auto.end(),
+                                       [](bool on) { return on; });
+        if (o.native_preset.empty() || o.no_ple || o.ple_io != "direct") {
+            std::fprintf(stderr, "RYZENStrata requires the native ISTA-DASLab Q2_0 model and --ple-io direct\n");
+            return 2;
+        }
+        if (o.no_pool || o.no_capture || o.graph_only || o.gpu_only_full || o.gpu_stages || o.no_fast_select ||
+            o.native_flash_attn_short || o.cpu_oracle_q8_0 || o.pool_measure || o.prefill_chunk <= 0 ||
+            o.peer_device >= 0 || remote || !o.layer_split.empty() || o.batch > 0 || o.pipeline_windows > 0 ||
+            o.spec_split || o.spec < 2 || o.spec > 6) {
+            std::fprintf(stderr, "RYZENStrata requires a single GPU and the regular GPU prompt and verify paths (2 to 6 verify rows)\n");
+            return 2;
+        }
+        if (o.draft_auto || o.draft_fallback == "mtp" || (!o.mtp.empty() && o.draft != "dflash2") || o.draft == "mtp") {
+            std::fprintf(stderr, "RYZENStrata supports Q4_0 DFlash2 or unassisted decoding\n");
+            return 2;
+        }
+        if (std::getenv("STRATA_LOGPOS") != nullptr || std::getenv("STRATA_FOLLOW_LOGPOS") != nullptr) {
+            std::fprintf(stderr, "RYZENStrata does not run CPU log-probability diagnostics\n");
+            return 2;
+        }
+        o.ple_io_explicit = true;
+        o.pcie_mode = "kernel";
+        o.pcie_frac = 1.0;
+        o.lookup_max_t = 0;
+        o.lookup_chain = 0;
+        o.suffix_draft = 0;
+        strata::core::set_tail_skip_rank(0);
+        strata::prefill::Prefill::require_gpu_ple();
     }
     {   // --ram-keep-gib W (or STRATA_RAM_KEEP_GIB, for a program that cannot pass the flag; the flag wins): the RAM to leave free.  It also
         // raises the headroom of the explicit RAM modes (--resident-budget-gib, --resident-experts) to at least W, unless
@@ -5393,6 +5464,14 @@ int main(int argc, char** argv) {
         // anything is allocated: an unsupported down type used to exit from inside the first verify window, and
         // an unsupported dequant type left the prompt path's fp16 buffer unwritten.
         const auto& lay = strata::kernels::cpu::expert_layout();
+        if (o.gpu_experts_only) {
+            constexpr int q2_0 = static_cast<int>(strata::quant::Type::Q2_0);
+            if (!lay.native || lay.fmt.empty() || std::any_of(lay.fmt.begin(), lay.fmt.end(),
+                    [](const auto& fmt) { return fmt.gu_type != q2_0 || fmt.d_type != q2_0; })) {
+                std::fprintf(stderr, "RYZENStrata requires the native Q2_0 expert layout\n");
+                return 2;
+            }
+        }
         for (int64_t l = 0; lay.native && l < (int64_t) lay.fmt.size(); ++l) {
             const auto& f = lay.fmt[(size_t) l];
             if (!strata::kernels::native_expert_supported(f.gu_type, f.d_type, f.n_embd, f.n_ff)) {
@@ -5465,6 +5544,34 @@ int main(int argc, char** argv) {
         }
         std::fprintf(stderr, "strata generate: primary device from STRATA_PRIMARY_DEVICE: CUDA%d\n", primary_device);
     }
+#if defined(STRATA_RYZEN_PROFILE)
+    {
+        cudaDeviceProp prop{};
+        const std::string cpu = strata::kernels::cpu::cpu_name();
+        if (cpu.find("Ryzen AI Max+") == std::string::npos ||
+            (cpu.find(" 395") == std::string::npos && cpu.find(" 495") == std::string::npos)) {
+            std::fprintf(stderr, "RYZENStrata requires a Ryzen AI Max+ 395 or Ryzen AI Max+ PRO 495 (%s)\n", cpu.c_str());
+            return 2;
+        }
+        if (cudaGetDeviceProperties(&prop, primary_device) != cudaSuccess ||
+            !strata::kernels::gfx_arch_is_gfx1151(prop.gcnArchName)) {
+            std::fprintf(stderr, "RYZENStrata requires a Ryzen AI Max+ gfx1151 integrated Radeon\n");
+            return 2;
+        }
+#if defined(_WIN32)
+        ULONGLONG installed_kib = 0;
+        if (GetPhysicallyInstalledSystemMemory(&installed_kib) && installed_kib < (64ull << 20)) {
+            std::fprintf(stderr, "RYZENStrata requires at least 64 GiB of installed system memory\n");
+            return 2;
+        }
+#endif
+        if ((uint64_t) prop.totalGlobalMem < (48ull << 30))
+            std::fprintf(stderr, "RYZENStrata: %.1f GiB of GPU memory reported by HIP (48 GiB or more recommended)\n",
+                         (double) prop.totalGlobalMem / (1ull << 30));
+        std::fprintf(stderr, "RYZENStrata: gfx1151 HIP, GPU-only model arithmetic, %s KV, %lld-token context\n",
+                     o.kv.c_str(), (long long) o.max_context);
+    }
+#endif
     // ---- STRATA_EXPERT_NIBBLE=1 keeps the gate/up experts of IQ2_S / IQ3_XXS / IQ3_S layers as 4-bit codes in their VRAM
     // slots (strata/core/expert_nibble.hpp).  Unset or 0: nothing here runs, no table is set, and every slot size below is
     // the GGUF blob's, as before.  On: if anything would read a converted slot as GGUF blocks or write GGUF bytes into
@@ -6267,6 +6374,18 @@ int main(int argc, char** argv) {
     float* ple_emb_dev = nullptr;
     float* ple_scratch = nullptr;
     if (!o.ple_gguf.empty()) {
+        if (o.gpu_experts_only) {
+            std::string disk;
+#if defined(_WIN32)
+            const bool rotational = on_rotational_disk(o.ple_gguf, disk) == 1;
+#else
+            const bool rotational = !under_wddm() && on_rotational_disk(o.ple_gguf, disk) == 1;
+#endif
+            if (rotational) {
+                std::fprintf(stderr, "RYZENStrata requires the n-gram table on an SSD; %s is rotational\n", disk.c_str());
+                return 2;
+            }
+        }
         strata::kernels::PleIoOptions pio;
         pio.mode = o.ple_io == "mmap" || o.ple_io == "ram" ? strata::kernels::PleIo::Mmap : strata::kernels::PleIo::Direct;
         pio.lock = o.ple_io == "ram";
@@ -6286,8 +6405,12 @@ int main(int argc, char** argv) {
             if (pio.mode != strata::kernels::PleIo::Direct || !pio.io_thread) pio.keepalive_ms = 0;
         }
         if (!ple_table.open(o.ple_gguf, err, pio)) {
-            std::fprintf(stderr, "strata generate: %s\n", err.c_str());
+            std::fprintf(stderr, "strata generate: %s%s\n", o.gpu_experts_only ? "cannot open the SSD n-gram table for direct I/O: " : "", err.c_str());
             return 1;
+        }
+        if (o.gpu_experts_only && std::strcmp(ple_table.format(), "IQ4_NL") != 0) {
+            std::fprintf(stderr, "RYZENStrata requires the IQ4_NL n-gram table from the ISTA-DASLab Q2_0 model\n");
+            return 2;
         }
         // 0.2.7 (R9700 measurement): keep the table resident in RAM when the PC can afford it.  The rows of a
         // prompt token are random 90 B reads in a 28.8 GB table, so even a cached direct read pays ~100 us a
@@ -6349,7 +6472,7 @@ int main(int argc, char** argv) {
         }
         // Recommend, never force: when the default direct reads measure slow, switch to the mapped reads (40-100x
         // faster on the reporters' drives); an explicit --ple-io direct is kept and only warned about.
-        if (pio.mode == strata::kernels::PleIo::Direct && std::getenv("STRATA_PLE_PROBE") == nullptr) {
+        if (!o.gpu_experts_only && pio.mode == strata::kernels::PleIo::Direct && std::getenv("STRATA_PLE_PROBE") == nullptr) {
             constexpr double kSlowRowsPerS = 15000.0;   // ~60 MB/s of 4 KiB pages; a healthy NVMe is >100k
             const double rps = ple_direct_rows_per_s(ple_table);
             if (rps >= kSlowRowsPerS)
@@ -8271,7 +8394,11 @@ int main(int argc, char** argv) {
                               : o.pipeline_windows > 0 ? "it does not run beside --pipeline-windows (the MTP's speculative next window has no DFlash2 counterpart); --pipeline-windows 0"
                               : o.draft_model.empty() ? "it needs --draft-model PACK (tools/dflash2_pack.py)" : nullptr;
             if (why == nullptr) {
-                if (df2.load(o.draft_model, multi_gpu && last_st != nullptr && !df2_first ? last_st->dev : 0, err)) {
+                if (df2.load(o.draft_model, multi_gpu && last_st != nullptr && !df2_first ? last_st->dev : primary_device, err)) {
+                    if (o.gpu_experts_only && !df2.is_q4_0()) {
+                        std::fprintf(stderr, "RYZENStrata requires a Q4_0 DFlash2 draft model\n");
+                        return 2;
+                    }
                     use_df2 = true;
                     // Per card class, from the measured A/Bs (notes-dflash2-p1.md, RESULTS-CONF.md 11-08; the numbers are in core/draft_cap.hpp): Strix Halo 8, Blackwell cc 12.0 with
                     // at least 48 GB 8, other Blackwell 6; a 12 GB NVIDIA card is slower with DFlash2 than with the MTP at every cap but code, which only the user can know.
@@ -10246,6 +10373,7 @@ int main(int argc, char** argv) {
     drive.d.split_rows = !o.no_split_rows;
     drive.d.pool = &pool;
     drive.d.src = srcp;
+    drive.d.gpu_only = o.gpu_experts_only;
     drive.d.n_expert = g.n_expert;
     drive.d.jobs.resize((size_t) K);
     // P1.8 (PR 4972, re-checked as residency changes): when every routed expert sits in the GPU caches the decode reads nothing
@@ -10299,7 +10427,7 @@ int main(int argc, char** argv) {
                           [] { const char* v = std::getenv("STRATA_FS_AHEAD"); return v == nullptr || std::atoi(v) != 0; }();
     // STRATA_LOOKAHEAD_STATS=1 (measurement only): run the predictor on any tier and score it against the real routing
     const bool la_stats = srcp != nullptr && [] { const char* v = std::getenv("STRATA_LOOKAHEAD_STATS"); return v != nullptr && std::atoi(v) != 0; }();
-    if (srcp != nullptr && ((srcp == &src && src.warms()) || fs_ahead || la_stats) &&
+    if (!o.gpu_experts_only && srcp != nullptr && ((srcp == &src && src.warms()) || fs_ahead || la_stats) &&
         (la_env == nullptr || std::atoi(la_env) != 0)) {
         std::vector<std::vector<uint16_t>> routers((size_t) g.n_layers);
         bool ok = true;
@@ -10482,9 +10610,10 @@ int main(int argc, char** argv) {
     strata::core::HitFn hit_fn =
         (o.no_pool || o.expert_cache <= 0) ? nullptr : &strata::core::expert_hit_run;
     void* pool_user = o.no_pool ? nullptr : (void*) &drive;
-    std::fprintf(stderr, "strata generate: %d expert-pool workers%s%s\n", pool.workers(),
-                 pool.host_works() ? " + the host thread" : "",
-                 o.no_pool ? " (UNUSED: --no-pool)" : "");
+    if (!o.gpu_experts_only)
+        std::fprintf(stderr, "strata generate: %d expert-pool workers%s%s\n", pool.workers(),
+                     pool.host_works() ? " + the host thread" : "",
+                     o.no_pool ? " (UNUSED: --no-pool)" : "");
     // STRATA_L3_PF=1 (opt-in): static row slices per worker, and after each layer the workers read the next layer's
     // likely non-resident experts (its router on this layer's input, the top STRATA_L3_PF_TOP by votes, default 4) into
     // their caches while the GPU works.  STRATA_POOL_STATIC=1: the static slices alone (an A/B arm).
@@ -10495,7 +10624,7 @@ int main(int argc, char** argv) {
         if (cudaMemGetInfo(&fb_pf, &tb_pf) != cudaSuccess) { (void) cudaGetLastError(); tb_pf = 0; }
         const bool want_pf = strata::core::l3_pf_auto_default(pf_env, (uint64_t) tb_pf, xcache.slots(), g.n_layers * g.n_expert, pool.workers());
         const bool want_static = want_pf || (st_env != nullptr && std::atoi(st_env) != 0);
-        if (want_static && !o.no_pool && strata::kernels::cpu::expert_layout().native) {
+        if (!o.gpu_experts_only && want_static && !o.no_pool && strata::kernels::cpu::expert_layout().native) {
             pool.set_static_slices(true);
             std::fprintf(stderr, "strata generate: expert pool: static row slices %s\n",
                          pool.static_slices() ? "on" : "off (the NUMA split, or one thread)");
@@ -11869,7 +11998,7 @@ int main(int argc, char** argv) {
         const char* v = std::getenv("STRATA_PREFILL_CPU_SHARE_BATCH");
         return v != nullptr && v[0] == '1';
     }();
-    const bool serve_share_pool = (o.batch <= 0 || share_batch_env) && !o.no_pool;
+    const bool serve_share_pool = !o.gpu_experts_only && (o.batch <= 0 || share_batch_env) && !o.no_pool;
     bool serve_share_has_work = strata::prefill::share_rules::default_share_has_work(
         (int64_t) xcache.slots(), (int64_t) (g.n_layers * g.n_expert));   // #1595
 #if defined(STRATA_USE_HIP) || defined(STRATA_USE_SYCL) || defined(__HIPCC__)
@@ -13224,6 +13353,7 @@ int main(int argc, char** argv) {
             return 1;
         }
         strata::core::Verifier ver;
+        ver.set_gpu_experts_only(o.gpu_experts_only);
         strata::core::VerifyHits vh;
         vh.d_res = thits.d_res;
         // STRATA_ROUTE_RESIDENT_MTP=1 (EXPERIMENTAL, with STRATA_ROUTE_RESIDENT=<margin>; changes the output): the MTP
@@ -13487,7 +13617,7 @@ int main(int argc, char** argv) {
             for (int st = 0; st + 1 < n_stages; ++st) stage_ver_p(st, 1).set_next(&stage_ver_p(st + 1, 1), &split_drive_b);
         }
         ver.set_remote_expert_opt(remote_opt.get());
-        if (pcie_balance() && n_stages == 1) ver.set_pcie_balance(&drive.d.pcie_model);
+        if (!o.gpu_experts_only && pcie_balance() && n_stages == 1) ver.set_pcie_balance(&drive.d.pcie_model);
         if (batch_mtp) ver.set_batch_graph_limit(64);   // --batch-mtp only: slot rotation makes many layouts (LRU); 0.1.39 keeps all
 #if defined(STRATA_HAVE_DFLASH2)
         if (use_df2) ver.set_taps(df2.tap_layers());
@@ -18940,6 +19070,10 @@ int main(int argc, char** argv) {
                     // unknown keys are skipped: the ids start at the first token without '='
                 }
             }
+            if (o.gpu_experts_only && req_logprobs >= 0) {
+                std::printf("ERR logprobs are unavailable in the GPU-only profile\n");
+                continue;
+            }
             strata::prefill::Prefill::set_pipe_request(req_pipe);   // every request sets it: none carries over
             bool req_df2 = use_df2;   // --draft auto: this request's drafter, decided once the prompt is parsed (below)
             std::vector<float> req_bias;
@@ -23977,7 +24111,7 @@ int main(int argc, char** argv) {
     if (!multi_gpu && o.batch <= 0)   // STRATA_SWITCH_POINT: before any bytes_needed, like the share
         strata::prefill::Prefill::set_card_expert_share((int64_t) xcache.slots(), (int64_t) (g.n_layers * g.n_expert), xcache.slots() > 0 ? (double) xcache.bytes() / (double) xcache.slots() / 1e6 : 0.0, o.pcie_probe_gbps, pool.workers());
     // #1595: not by default when the cache holds every expert (nothing to take)
-    strata::prefill::Prefill::arm_cpu_share(!multi_gpu && !o.no_pool,
+    strata::prefill::Prefill::arm_cpu_share(!o.gpu_experts_only && !multi_gpu && !o.no_pool,
         !multi_gpu && !o.no_pool && o.batch <= 0 &&
         strata::prefill::share_rules::default_share_has_work((int64_t) xcache.slots(), (int64_t) (g.n_layers * g.n_expert)) &&
         share_default_ok());   // H11   // before the chunk below sizes the loan
@@ -24114,7 +24248,7 @@ int main(int argc, char** argv) {
         }
         if (borrow == nullptr)
             std::fprintf(stderr, "strata generate: prompt path allocates its own buffers (no cache slots to borrow)\n");
-        if (!multi_gpu && !o.no_pool) prefill.set_cpu_pool(&pool);
+        if (!o.gpu_experts_only && !multi_gpu && !o.no_pool) prefill.set_cpu_pool(&pool);
         if (!prefill.init(wt, g, ss, srcp, o.expert_cache > 0 ? &xcache : nullptr,
                           host_res.empty() ? nullptr : host_res.data(), o.prefill_chunk, main_cs, err, borrow,
                           borrow_bytes)) {
@@ -24489,6 +24623,7 @@ int main(int argc, char** argv) {
         }
         mem_mark("the head and the prompt path");
         strata::core::Verifier ver;
+        ver.set_gpu_experts_only(o.gpu_experts_only);
         strata::core::VerifyHits vh;
         vh.d_res = thits.d_res;
         vh.h_res = host_res.empty() ? nullptr : host_res.data();
@@ -24496,7 +24631,7 @@ int main(int argc, char** argv) {
         vh.blob = thits.blob;
         vh.slot_off = xcache.slot_offsets();   // E-6: the device plan's pointers
         vh.n_slots = xcache.slots();
-        if (pcie_balance()) ver.set_pcie_balance(&drive.d.pcie_model);
+        if (!o.gpu_experts_only && pcie_balance()) ver.set_pcie_balance(&drive.d.pcie_model);
 #if defined(STRATA_HAVE_DFLASH2)
         if (use_df2) ver.set_taps(df2.tap_layers());
 #endif

@@ -5279,6 +5279,12 @@ void expert_pool_dispatch(void* user, const float* x_f, const int32_t* ids, cons
     (void) weights;   // clause 2: `moe_combine` applies it on the device.  Not an oversight.
     ExpertDispatch& d = *(ExpertDispatch*) user;
     if (d.failed) return;   // a previous layer already failed; do not make it worse
+    if (d.gpu_only) {
+        d.failed = true;
+        d.fail = "GPU-only inference requires the verify window";
+        d.fail_layer = d.layers;
+        return;
+    }
 
     using namespace strata::kernels::cpu;
     // Clause 3: the blob's internal offsets are compile-time constants, so a mismatched geometry does not
@@ -5502,7 +5508,7 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
         // STRATA_ROUTE_TAIL_SKIP=R (default 7 on CUDA serve, =0 off; changes the output): a missed expert that EVERY token of the window routes
         // only at rank >= R (the smallest weights of the top-10) is neither copied nor computed; its contribution is
         // zero, without renormalisation (the others keep the weight the router gave them).  Less PCIe and CPU work.
-        const int tail_rank = tail_skip_rank();
+        const int tail_rank = d.gpu_only ? 0 : tail_skip_rank();
         bool skip_d[kMaxWindowEntries];
         for (int q = 0; q < nd; ++q) skip_d[q] = false;
         // (not taken from #6023: the tail skip with a peer card - it changes the bits of a --peer-device run that sets
@@ -5542,7 +5548,9 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
         }
         // STRATA_PCIE_BALANCE (opt-in, #1548): the count comes from the measured CPU and GPU costs instead of the share
         const bool pcie_ok = (d.pcie_num > 0 || d.pcie_model.on) && d.src->pcie_layer(d.layers);
-        int m = pcie_ok ? d.pcie_model.pick(nmiss, (nmiss * d.pcie_num) >> 8) : 0;
+        int m = 0;
+        if (d.gpu_only) m = nmiss;
+        else if (pcie_ok) m = d.pcie_model.pick(nmiss, (nmiss * d.pcie_num) >> 8);
         // STRATA_PCIE_MIN1 (opt-in): the share rounds to 0 for 1-2 misses per layer, so the PCIe lane idles on the typical
         // decode step; with >= 2 misses give it at least one (the last in routing order).  It only flies if its blob is
         // pinned (the fetch below checks), else it stays a CPU miss exactly as before.  Read once.
@@ -5550,11 +5558,12 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
         if (pcie_min1 && pcie_ok && m < 1 && nmiss >= 2) m = 1;
         int miss_rank = 0, groups = 0, entries = 0, fetches = 0;
         GpuPlanSink& P = *d.plan;
+        const uint64_t bb = lay.blob_bytes(d.layers);
         const uint8_t* dma_src[64];
         int64_t pcie_i0[64];
         // STRATA_ADAPT_FETCH: the share is the layer's most-routed misses, and the ones the tier would swap in are copied
         // into a slot as they are fetched (ExpertDispatch::fetch_admit)
-        const bool fetch_on = m > 0 && d.fetch_can(d.layers);
+        const bool fetch_on = !d.gpu_only && m > 0 && d.fetch_can(d.layers);
         const float* use = d.usage.empty() ? nullptr : d.usage.data() + (size_t) d.layers * (size_t) d.n_expert;
         bool pick[kMaxWindowEntries];
         if (fetch_on) {
@@ -5595,8 +5604,15 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
                 } else {
                     if (d.fs != nullptr) d.fs->note_miss(d.src, d.layers, e);
                     if ((fetch_on ? pick[q] : miss_rank >= nmiss - m) && fetches < P.staging_cap && fetches < 64) {
-                        const uint8_t* src = d.src->pinned(d.layers, e) ? d.src->blob(d.layers, e) : nullptr;
+                        const bool stage = d.gpu_only && P.host_staging != nullptr && P.mapped_staging != nullptr;
+                        const uint8_t* src = (stage || d.src->pinned(d.layers, e)) ? d.src->blob(d.layers, e) : nullptr;
                         if (src != nullptr) {
+                            if (stage) {
+                                // The file-tier buffer can be recycled by the next blob read. Copy it into the
+                                // per-window mapped buffer now; the GPU stages it after the plan is published.
+                                std::memcpy(P.host_staging + (size_t) fetches * bb, src, (size_t) bb);
+                                src = P.host_staging + (size_t) fetches * bb;
+                            }
                             kd = 1;
                             dma_src[fetches] = src;
                             pcie_i0[fetches] = i0;
@@ -5620,11 +5636,13 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
             ++groups;
         }
         P.start[groups] = entries;
-        const uint64_t bb = lay.blob_bytes(d.layers);
         for (int q = 0; q < fetches; ++q) {       // the PCIe groups: staging slot q, entries after the VRAM ones
             const int64_t i0 = pcie_i0[q];
-            P.ptr2[q] = P.pcie_mode != 0 ? (unsigned long long) d.src->device_alias(d.layers, ids[i0])
-                                 : P.staging + (unsigned long long) q * (unsigned long long) bb;
+            if (d.gpu_only && P.mapped_staging != nullptr)
+                P.ptr2[q] = (unsigned long long) (P.mapped_staging + (size_t) q * bb);
+            else
+                P.ptr2[q] = P.pcie_mode != 0 ? (unsigned long long) d.src->device_alias(d.layers, ids[i0])
+                                     : P.staging + (unsigned long long) q * (unsigned long long) bb;
             P.start2[q] = entries;
             for (int64_t i = i0; i < n; ++i)
                 if (first_of[i] == i0) {
@@ -5634,7 +5652,7 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
                 }
             ++d.pcie_experts;
         }
-        if (d.fetch_admit > 0 && P.dst2 != nullptr)
+        if ((d.gpu_only || d.fetch_admit > 0) && P.dst2 != nullptr)
             for (int q = 0; q < fetches; ++q) P.dst2[q] = 0;   // staging
         if (fetch_on && fetches > 0 && (size_t) d.layers < d.fetch_avail.size()) d.fetch_avail[(size_t) d.layers] = 1;
         if (fetch_on && fetches > 0) {
@@ -5736,6 +5754,13 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
     bool any_cpu = false;
     for (int64_t i = 0; i < n; ++i)
         if (kind[i] == -1) { any_cpu = true; break; }   // -2: skipped (STRATA_ROUTE_TAIL_SKIP), no work
+    if (d.gpu_only && any_cpu) {
+        std::memset(out, 0, (size_t) n * H * sizeof(float));
+        d.failed = true;
+        d.fail = "GPU-only inference could not stage every routed expert";
+        d.fail_layer = d.layers;
+        return;
+    }
     if (d.dres_check != nullptr && any_cpu) {   // STRATA_ADAPT_CHECKRES
         bool published = false;
         for (int64_t i = 0; i < n && !published; ++i)

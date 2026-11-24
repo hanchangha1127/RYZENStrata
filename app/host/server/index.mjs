@@ -149,6 +149,7 @@ const appUi = createAppUi({ shutdown: () => shutdown() });
 /* The app's version has one source: the desktop shell passes it (STRATA_APP_VERSION, from app/desktop/src-tauri/Cargo.toml). Outside the app it is read from the same file in a checkout, else 'dev'. */
 function appVersion() { return appVersionFrom({ env: process.env, here: HERE }); }
 const appUpdater = appUi.updater;
+const isRyzenApp = () => process.env.STRATA_RYZEN_EDITION === '1' || native.isRyzen();
 const shellNotifier = createShellNotifier();
 /** What the page needs for the desktop settings: whether this is the desktop app, the port in use, the saved choices and a busy-port notice. */
 function shellState() {
@@ -164,7 +165,7 @@ function shellState() {
 }
 /* The engine that ships inside the installer is put in the components folder when this PC has none (or an older one); no network, hashes checked. The model list waits for it. */
 const bundledEngine = control && !process.env.STRATA_NO_BUNDLED_ENGINE
-  ? installBundledEngine({ bundleDir: process.env.STRATA_ENGINE_BUNDLE_DIR || resolve(HERE, '..', '..', 'engine-bundle'), components: componentsDirectory(), log: line => console.log(line) })
+  ? installBundledEngine({ ...(process.env.STRATA_RYZEN_EDITION === '1' ? { backend: 'hip' } : {}), bundleDir: process.env.STRATA_ENGINE_BUNDLE_DIR || resolve(HERE, '..', '..', 'engine-bundle'), components: componentsDirectory(), log: line => console.log(line) })
   : Promise.resolve({ action: 'none' });
 const engineBundleDir = process.env.STRATA_ENGINE_BUNDLE_DIR || resolve(HERE, '..', '..', 'engine-bundle');
 /* An update from a per-GPU installer leaves its engine-bundle behind; it goes only when the same engine is complete in the store (sizes and hashes). */
@@ -177,7 +178,7 @@ bundledEngine.then(result => { if (result?.action === 'wrong-make') { bundledWro
 if (control) {
   const engineOf = control.engine.bind(control);
   control.engine = async (...args) => {
-    const answer = await engineOf(...args);
+    const answer = await engineOf(...(isRyzenApp() ? [{ backend: 'hip' }] : args));
     return answer && !answer.usable && bundledWrongMake ? { ...answer, notice: bundledWrongMake, wrongMake: true } : answer;
   };
 }
@@ -192,6 +193,7 @@ agentTools.ensureFile();
 const visionProbe = createVisionProbe();
 /** The model APIs as the chat picker sees them: each model says whether it reads pictures (what the person ticked, else what the server answered). Unanswered models are asked in the background. */
 function withPictureAnswers(list) {
+  if(isRyzenApp())return { ...list, connections: [], providers: [] };
   const secrets = new Map(modelProviders.withSecrets().map(c => [c.id, c]));
   const connections = (list.connections ?? []).map(c => ({ ...c, models: c.models.map(m => {
     const asked = visionProbe.known(c, m.id);
@@ -210,7 +212,7 @@ async function pictureRefusal(connection, model) {
   const fix = `open Settings → Models, edit "${connection.name}" and turn on "Read pictures with this model"`;
   return `"${model.name}" is set not to read pictures (or its server says it cannot: a llama-server started without --mmproj, or a text-only model). If that is wrong, ${fix}. Otherwise choose a model that reads pictures.`;
 }
-const optimizerSettings = () => savedContextOptimizer(store.get().agentChat?.contextOptimizer);
+const optimizerSettings = () => savedContextOptimizer(isRyzenApp() ? null : store.get().agentChat?.contextOptimizer);
 const agent = createAgentBridge({
   contextOptimizer: optimizerSettings,
   tools: () => agentTools.profileView(),
@@ -241,7 +243,7 @@ const agent = createAgentBridge({
     // its "Tool timeout (seconds)": the agent waits as long for those servers as the engine does (#5788)
     mcpTimeoutS: i.mcpTimeoutS ?? null,
   })),
-  connections: () => modelProviders.withSecrets().map(c => ({ ...c, models: c.models.map(m => ({ ...m, vision: readsPicturesByDefault(m, visionProbe.known(c, m.id)), reasoning: m.reasoning ?? visionProbe.knownThinks(c, m.id) ?? null })) })),
+  connections: () => isRyzenApp() ? [] : modelProviders.withSecrets().map(c => ({ ...c, models: c.models.map(m => ({ ...m, vision: readsPicturesByDefault(m, visionProbe.known(c, m.id)), reasoning: m.reasoning ?? visionProbe.knownThinks(c, m.id) ?? null })) })),
   log: line => console.log(line),
 });
 // The person's choice of when the assistant summarises an old part of a chat, before the first profile is written.
@@ -1148,6 +1150,7 @@ async function api(req, res, path, method, url) {
    const file=join(folder,`strata-diagnostics-${new Date().toISOString().replace(/[:.]/g,'-').slice(0,19)}.txt`);writeFileSync(file,lines.join(NL),'utf8');
    return json(res,200,{path:file});}
   if(path==='/api/native/local/preview'&&method==='POST'){
+   if(isRyzenApp())return error(res,409,'Choose the ISTA-DASLab Q2_0 model folder from RYZENStrata setup.');
    /* "Use a local GGUF": pick (or type) the folder or file (.gguf / .strata), and Control says what is in it. Nothing is copied or changed. */
    const typed=await typedFolder((await readBody(req)).path,{isAbsolute,fileType:/\.(gguf|strata)$/i});
    const picked=typed?{path:typed}:await chooseFolder('Choose the folder that holds your GGUF files');
@@ -1178,6 +1181,7 @@ async function api(req, res, path, method, url) {
   // Credentials are handled only on the host. Responses and events expose a key-set flag.
   return error(res,404,'Unknown native control action.');}catch(e){return error(res,/Finish|Unload|running|current operation/.test(e.message)?409:400,e.message,{...(e.code&&typeof e.code==='string'?{code:e.code}:{}),...(e.details?{details:String(e.details)}:{})});}}
 
+  if (isRyzenApp() && path.startsWith('/api/model-providers') && method !== 'GET') return error(res, 409, 'RYZENStrata uses the local Q2_0 model.');
   if (path === '/api/model-providers' && method === 'GET') return json(res, 200, withPictureAnswers(modelProviders.list()));
   if (path === '/api/model-providers/discover' && method === 'POST') {
     const body = await readBody(req);
@@ -1255,6 +1259,7 @@ async function api(req, res, path, method, url) {
   }
   if (path === '/api/timeskip/start' && method === 'POST') {
     const body = await readBody(req);
+    if(isRyzenApp() && body.remoteModel)return error(res,409,'RYZENStrata uses the local Q2_0 model.');
     const workspaceId = typeof body.workspaceId === 'string' ? body.workspaceId : null;
     const workspace = String(body.workspace ?? '').trim() || ((workspaceId ? workspaces.find(w => w.id === workspaceId)?.path : null) ?? WORKSPACE);
     const prompt = String(body.prompt ?? '').trim().slice(0, 4000);
@@ -1481,6 +1486,7 @@ async function api(req, res, path, method, url) {
 
   if (path === '/api/setup' && method === 'GET') return json(res, 200, setupState());
   if (path === '/api/engine/first-run' && method === 'GET') {
+    if (isRyzenApp()) return json(res, 200, { status: 'unavailable', gpus: hardware.cachedHardware()?.gpus ?? [], message: 'Choose a RYZENStrata HIP engine package for this computer.' });
     if (!control?.updateCheck) return json(res, 200, { status: 'unavailable', gpus: [] });
     const info = await engineFirstRun({ control, gpus: hardware.cachedHardware()?.gpus ?? [] });
     try { let at = componentsDirectory(); while (at && !existsSync(at) && dirname(at) !== at) at = dirname(at); const f = statfsSync(at); info.freeBytes = Number(f.bavail) * Number(f.bsize); } catch { /* unknown: no warning */ }
@@ -1510,6 +1516,7 @@ async function api(req, res, path, method, url) {
     await pipeline(req, createWriteStream(target, { mode: 0o600 }));
     return json(res, 202, native.operation('install-engine-file', { path: target }));
   }
+  if (path === '/api/updates/check' && method === 'GET' && isRyzenApp()) return json(res, 200, { checkedAt: new Date().toISOString(), strata: { status: 'unknown', message: 'Automatic app updates are unavailable in RYZENStrata.' }, engine: { status: 'unknown', message: 'Install a RYZENStrata HIP engine package to update the engine.' } });
   if (path === '/api/updates/check' && method === 'GET' && control?.updateCheck) return json(res, 200, await checkComponentUpdates({ control, appUpdater, appVersion: process.env.STRATA_APP_VERSION || null }));
   if (path === '/api/updates/check' && method === 'GET') return json(res, 200, await checkUpdates({ appVersion:appVersionToShow(setupState().app.version,native.state().version), engineVersion:native.state().available?(native.state().installed?.engine?.version??null):(await engine.config()).engine.version }));
 
@@ -1548,6 +1555,7 @@ async function api(req, res, path, method, url) {
     try { return json(res, 200, { ...browseLocalModels(url.searchParams.get('directory') ?? store.MODELS_DIR), shortcuts }); }
     catch (err) { return error(res, 400, err.message); }
   }
+  if (isRyzenApp() && method === 'POST' && ['/api/local-models', '/api/local-models/inspect'].includes(path)) return error(res, 409, 'Choose the ISTA-DASLab Q2_0 model folder from RYZENStrata setup.');
   if (path === '/api/local-models/inspect' && method === 'POST') {
     try { const body=await readBody(req); return json(res,200,inspectLocalModel(body.path)); }
     catch (err) { return error(res,400,err.message); }
@@ -1593,6 +1601,7 @@ async function api(req, res, path, method, url) {
     } catch (err) { return error(res, 400, err.message); }
     finally { storageChanging = false; hub.send('models', models.library()); hub.send('setup', setupState()); }
   }
+  if (isRyzenApp() && path.startsWith('/api/image-models') && method !== 'GET') return error(res, 409, 'RYZENStrata uses the local Q2_0 model.');
   if (path === '/api/image-models' && method === 'GET') return json(res, 200, imageModels.library());
   if (path === '/api/image-models' && method === 'PATCH') {
     const body = await readBody(req);
@@ -1607,6 +1616,7 @@ async function api(req, res, path, method, url) {
   if(path==='/api/runtime' && method==='GET')return json(res,200,runtimeState());
   if(path==='/api/runtime/plan' && method==='POST')return json(res,200,runtimeModels.plan(await readBody(req)));
   if(path==='/api/runtime/load' && method==='POST'){
+    if(isRyzenApp())return error(res,409,'Load the Q2_0 model from the RYZENStrata Models screen.');
     const body=await readBody(req);const checked=await engine.validate({...body.config,variantId:body.variantId});
     if(storageChanging)return error(res,409,'Wait for the model folder check to finish.');
     if(!checked.ok)return error(res,400,checked.issues.filter(i=>i.level==='error').map(i=>i.message).join(' '));
@@ -1631,6 +1641,7 @@ async function api(req, res, path, method, url) {
   if (modelMatch) {
     const [, id, action] = modelMatch;
     if (method === 'DELETE') {if(runtimeModels.hasVariant(id))return error(res,409,'Unload every instance of this model before deleting its files.');return json(res, 200, runtimeModels.libraryState(models.remove(id)));}
+    if (isRyzenApp() && method === 'POST' && ['install', 'load'].includes(action)) return error(res, 409, 'Choose the Q2_0 model from the RYZENStrata Models screen.');
     if (method === 'POST' && action === 'install') { try { return json(res, 200, runtimeModels.libraryState(await models.install(id))); } catch (err) { return error(res, err.status ?? 500, err.message); } }
     if (method === 'POST' && action === 'cancel') return json(res, 200, runtimeModels.libraryState(models.cancel(id)));
     if (method === 'POST' && action === 'load') {
@@ -2029,6 +2040,7 @@ async function api(req, res, path, method, url) {
   // When the assistant summarises an old part of a chat (Settings -> Chat). null puts a name back to automatic;
   // the running assistant picks the new number up on its next message (it is part of the profile's signature).
   if (path === '/api/agent/context-optimizer' || path === '/api/agent/context-optimizer/test') {
+    if(isRyzenApp() && method !== 'GET')return error(res,409,'RYZENStrata uses the local Q2_0 model for chat context.');
     if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress)) {
       return error(res, 403, 'Open the local Strata app to manage Context Optimizer.');
     }
@@ -2267,6 +2279,7 @@ async function api(req, res, path, method, url) {
   // --- chat ---------------------------------------------------------------
   if ((path === '/api/chat/stream' || path === '/api/plan/start-goal') && method === 'POST') {
     const body = await readBody(req,12*1024*1024);
+    if(isRyzenApp() && body.remoteModel)return error(res,409,'RYZENStrata uses the local Q2_0 model.');
     if (path === '/api/plan/start-goal') { body.message = '/plan start'; if (typeof body.planId !== 'string') return error(res, 400, 'planId is required'); }
     let images;try{const named=Array.isArray(body.imageIds)&&body.imageIds.length?uploads.dataUrls(typeof body.sessionId==='string'?body.sessionId:'',body.imageIds):[];images=validateChatImages([...(Array.isArray(body.images)?body.images:[]),...named]);}catch(e){return error(res,400,e.message);}
     if(images.length&&body.remoteModel){const own=modelProviders.withSecrets().find(c=>c.id===body.remoteModel.connectionId);const row=own?.models.find(m=>m.id===body.remoteModel.modelId);const refused=await pictureRefusal(own,row);if(refused)return error(res,409,refused);}

@@ -44,7 +44,7 @@ fn platform_data_dir() -> PathBuf {
         .filter(|p| p.is_absolute())
         .or_else(|| std::env::var_os("USERPROFILE").map(|h| PathBuf::from(h).join("AppData").join("Local")))
         .unwrap_or_else(std::env::temp_dir)
-        .join("Strata")
+        .join("RYZENStrata")
 }
 
 /// Linux and macOS: `$XDG_DATA_HOME/strata`, usually `~/.local/share/strata`.
@@ -55,7 +55,7 @@ fn platform_data_dir() -> PathBuf {
         .filter(|p| p.is_absolute())
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local").join("share")))
         .unwrap_or_else(std::env::temp_dir);
-    base.join("strata")
+    base.join("ryzenstrata")
 }
 
 pub fn logs_dir() -> PathBuf {

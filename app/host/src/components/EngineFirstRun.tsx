@@ -84,7 +84,7 @@ function gpuLine(info: FirstRunInfo) {
  * The first-run card: the engine this PC needs, one button to download it, progress, and the offline way (choose a downloaded file).
  * Nothing is downloaded before a button is pressed.
  */
-export function EngineFirstRun({ onDone }: { onDone: () => void }) {
+export function EngineFirstRun({ onDone, ryzen = false, hardwareError }: { onDone: () => void; ryzen?: boolean; hardwareError?: string | null }) {
     const [info, setInfo] = useState<FirstRunInfo | null>(null);
     const [job, setJob] = useState<NativeJob | null>(null);
     const [busy, setBusy] = useState(false), [problem, setProblem] = useState('');
@@ -191,7 +191,11 @@ export function EngineFirstRun({ onDone }: { onDone: () => void }) {
             : <p>{tr("Strata did not recognise a supported graphics card.")}</p>;
         let main, actions;
         const withoutEngine = <button type="button" className="onboard-continue-anyway" onClick={onDone}>{tr("Continue without an engine")}</button>;
-        if (info.status === 'offer' && info.offer) {
+        if (ryzen) {
+            main = <p>{tr(hardwareError ?? info.message ?? 'Choose a RYZENStrata HIP engine package for this computer.')}</p>;
+            actions = <>{!hardwareError ? pick('Choose a RYZENStrata HIP package…') : null}{withoutEngine}</>;
+        }
+        else if (info.status === 'offer' && info.offer) {
             main = <>{found}<p>{tr("To run models on it, Strata needs one download:")}<br/><strong>{tr("The engine for this card")}: {mb(info.offer.bytes + (info.control?.bytes ?? 0))} MB{info.control ? tr(WITH_CONTROL) : null}</strong></p>
                 {info.freeBytes !== undefined && info.freeBytes < info.offer.bytes * 2.5 ? <p className="small inline-error">{tr("The engine needs about {0} GB of free space on this drive and only {1} GB is free. Free some space, then continue.", [Math.ceil(info.offer.bytes * 2.5 / 1e9), (info.freeBytes / 1e9).toFixed(1)])}</p> : null}
                 <p className="small muted">{tr("It comes from Strata’s own update server and is checked before it is used. Your models and chats are never touched by it.")}</p></>;
@@ -214,12 +218,12 @@ export function EngineFirstRun({ onDone }: { onDone: () => void }) {
             main = <>{found}<p>{tr("Strata can’t pick an engine for this PC from its update list.")}</p>{info.message ? <p className="small muted">{info.message}</p> : null}{(info.reasons ?? []).length ? <ul className="small muted" style={{ textAlign: 'left', display: 'inline-block' }}>{(info.reasons ?? []).map(r => <li key={r}>{r}</li>)}</ul> : null}</>;
             actions = <><Btn variant="primary" disabled={busy} onClick={look}>{tr("Try again")}</Btn>{pick("Choose a downloaded file…")}<button type="button" className="onboard-continue-anyway" onClick={onDone}>{tr("Continue without an engine")}</button></>;
         }
-        body = <><div className="onboard-welcome-copy"><h1 tabIndex={-1} data-initial-focus>{tr("Welcome to Strata")}</h1>{main}</div>
+        body = <><div className="onboard-welcome-copy"><h1 tabIndex={-1} data-initial-focus>{tr(ryzen ? "Welcome to RYZENStrata" : "Welcome to Strata")}</h1>{main}</div>
             {failed ? <div className="onboard-error" style={{ maxWidth: 560, margin: '0 auto' }}><p role="alert" className="small inline-error">{job?.error ?? job?.summary}</p>
                 {job?.details ? <details className="error-detail"><summary className="small">{tr('Details')}</summary><pre className="small muted">{job.details}</pre></details> : null}
                 <p className="small muted">{percent >= 100 ? tr("The file was downloaded. Continue tries the install again.") : tr("The download stopped. Continue picks it up where it stopped.")}</p></div> : null}
             {problem ? <div className="onboard-error" style={{ maxWidth: 560, margin: '0 auto' }}><p role="alert" className="small inline-error">{problem}</p></div> : null}
-            <footer className="onboard-footer onboard-footer--welcome">{actions}<button type="button" className="onboard-continue-anyway" disabled={busy || running} onClick={() => void connectOnlyClick()}>{tr("Only connect to Strata on another computer")}</button><small>{tr("Nothing is downloaded. You can add the engine later from the Models page.")}</small></footer></>;
+            <footer className="onboard-footer onboard-footer--welcome">{actions}{!ryzen ? <button type="button" className="onboard-continue-anyway" disabled={busy || running} onClick={() => void connectOnlyClick()}>{tr("Only connect to Strata on another computer")}</button> : null}<small>{tr("Nothing is downloaded. You can add the engine later from the Models page.")}</small></footer></>;
     }
     return <div className="setup guided-onboarding" data-step="engine">{hidden}<header className="onboard-header"><Brand variant="lockup" height={22}/><FirstRunLanguage/></header>{body}</div>;
 }

@@ -90,6 +90,10 @@ def documents_dirs(environ=None, *, windows: bool | None = None, home: Path | No
     return found
 
 
+def default_data_dir() -> Path:
+    return documents_dirs()[0] / "RYZENStrata"
+
+
 def _read_json(path: Path) -> dict:
     try:
         with path.open("rb") as stream:
@@ -130,8 +134,8 @@ def own_settings_file(environ=None, *, windows: bool | None = None, home: Path |
         return Path(environ["STRATA_SETTINGS_FILE"])
     home = _home(home)
     if _windows(windows):
-        return Path(environ.get("APPDATA") or str(home / "AppData" / "Roaming")) / "Strata" / "settings.json"
-    return Path(environ.get("XDG_CONFIG_HOME") or str(home / ".config")) / "strata" / "settings.json"
+        return Path(environ.get("APPDATA") or str(home / "AppData" / "Roaming")) / "RYZENStrata" / "settings.json"
+    return Path(environ.get("XDG_CONFIG_HOME") or str(home / ".config")) / "ryzenstrata" / "settings.json"
 
 
 def has_configs(directory: Path) -> bool:
@@ -287,7 +291,7 @@ def data_dir_choices(*, environ=None, windows: bool | None = None, home: Path | 
     out.extend((p, src) for p, src, _ in entries)
     if not in_app_mode(environ):
         for d in documents_dirs(environ, windows=windows, home=home):
-            out.append((d / "Strata", "documents"))
+            out.append((d / "RYZENStrata", "documents"))
     return out
 
 

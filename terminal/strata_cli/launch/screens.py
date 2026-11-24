@@ -78,36 +78,11 @@ def tuned_sentence(row) -> str:
 
 
 def drafting_choice_available(ctx, family: str | None = None) -> bool:
-    """The Drafting step exists only where there is something to choose: Qwen3.8-Flash-Next (qwen, gyro) on a computer whose engine can run DFlash2
-    (CUDA or HIP, strata_control/drafting.py). Every other model has no step: the rest have only the MTP. `family`: the model family to ask for
-    (the Model step asks for the one under the cursor); default the chosen one."""
-    from strata_control import drafting
-    family = family if family is not None else getattr(getattr(ctx, "settings", None), "family", None)
-    if family not in drafting.SUPPORTED_FAMILIES or not drafting.ENGINE_SERVES_DFLASH2:
-        return False
-    catalog = getattr(ctx, "catalog", None)
-    backend, archs = drafting.hardware_for(catalog.installed_backend() if catalog is not None else None)   # #5109: the installed engine's family
-    return drafting.hardware_support(backend, archs).can_run
+    return True
 
 
 def flow_for(ctx, family: str | None = None) -> list[str]:
-    """The steps of this computer: the Cards step exists only when two or more graphics cards can be used; the Drafting step only for
-    Qwen3.8-Flash-Next on a computer that can run DFlash2; Tencent Hy4-Flash skips Qwen-only steps (drafting, parallel, tuning, advanced)."""
-    fam = family if family is not None else getattr(getattr(ctx, "settings", None), "family", None)
-    if fam == "hy4-flash":
-        if len(ctx.computer.usable_gpus) >= 2:
-            return ["model", "cards", "folder", "context", "pictures", "access", "save"]
-        return ["model", "folder", "context", "pictures", "access", "save"]
-    if fam == "inkling-2-mini":
-        if len(ctx.computer.usable_gpus) >= 2:
-            return ["model", "folder", "cards", "context", "pictures", "drafting", "parallel", "access", "save"]
-        return ["model", "folder", "context", "pictures", "drafting", "parallel", "access", "save"]
-    ids = [sid for sid, _ in STEPS]
-    if len(ctx.computer.usable_gpus) < 2:
-        ids.remove("cards")
-    if drafting_choice_available(ctx, family):
-        ids.insert(ids.index("pictures") + 1, "drafting")
-    return ids
+    return ["model", "folder", "context", "drafting", "access", "save"]
 
 
 def _t(*parts: tuple[str, str] | str) -> Text:
@@ -1247,53 +1222,20 @@ def drafting_saved_choice(ctx, choices) -> str:
 
 class DraftingScreen(Base):
     step_id = "drafting"
-    help_text = "Drafting is how the model guesses the next words ahead to make answers faster. One drafter runs at a time."
-
-    CHOICES = (("auto", "Auto (recommended)"), ("mtp", "MTP"), ("dflash2", "DFlash2"), ("off", "Off"))
-    INKLING_CHOICES = (("auto", "DSpark Block-8 (recommended)"), ("off", "Off"))
+    help_text = "DFlash2 Q4_0 proposes tokens that the model verifies. Choose Off to serve without a drafter."
+    CHOICES = (("dflash2", "DFlash2 Q4_0 (default)"), ("off", "Off"))
 
     def body(self) -> ComposeResult:
-        yield Static(Text("How should the model guess ahead?", style=f"bold {ACCENT}"), markup=False)
         yield Menu(id="menu")
 
     def on_mount(self) -> None:
-        s = self.ctx.settings
-        if s.family == "inkling-2-mini":
-            items = [Item([label, Cell("DSpark" if key == "auto" else "no drafter", MUTE)], key=key)
-                     for key, label in self.INKLING_CHOICES]
-            shown = "off" if s.drafting == "off" else "auto"
-            sel = [key for key, _ in self.INKLING_CHOICES].index(shown)
-            self.query_one(Menu).columns = [("", 30), ("", 0)]
-            self.query_one(Menu).set_items(items, sel)
-            self.paint()
-            return
-        from strata_cli.launch import modelstate
-        now = {"dflash2": "DFlash2", "mtp": "MTP", "off": "Off"}[modelstate.resolved_drafting(None, s.family)]
-        items = [Item([label, Cell(now, "") if key == "auto" else Cell("", "")], key=key) for key, label in self.CHOICES]
-        shown = s.drafting if s.drafting in dict(self.CHOICES) else drafting_saved_choice(self.ctx, dict(self.CHOICES))
-        sel = [key for key, _ in self.CHOICES].index(shown)
-        self.query_one(Menu).columns = [("", 24), ("", 0)]
-        self.query_one(Menu).set_items(items, sel)
+        items = [Item([label], key=key) for key, label in self.CHOICES]
+        self.query_one(Menu).columns = [("", 0)]
+        self.query_one(Menu).set_items(items, int(self.ctx.settings.drafting == "off"))
         self.paint()
 
-    def explain(self) -> Text:
-        if self.ctx.settings.family == "inkling-2-mini":
-            return Text("DSpark is Inkling-2-Mini's built-in block drafter. Choose Off to pass --draft off (uses less VRAM and skips speculative drafting).", style=MUTE)
-        return Text("")
-
     def commit(self) -> None:
-        key = self.menu().current.key
-        if self.ctx.settings.family == "inkling-2-mini":
-            self.ctx.settings.drafting = "off" if key == "off" else None
-            return
-        from strata_cli.launch import modelstate
-        # Auto stays "nobody chose" (a saved preset writes nothing) unless the model's file or this launch holds another choice: then Auto is written, so it wins
-        base = self.ctx.base_config() or {}
-        layer_off = modelstate.layer_off_without_choice(base)  # the draft layer is off and nothing else is saved: the step showed Off
-        if layer_off and key == "off" and self.ctx.settings.drafting is None:
-            return                                            # Off left as it is: nothing new is written, the draft layer's "mtp": false keeps it
-        saved = "off" if layer_off else base.get("drafting") if base.get("drafting") is not None else drafting_launch_word(self.ctx)
-        self.ctx.settings.drafting = modelstate.drafting_to_save(key, saved)
+        self.ctx.settings.drafting = self.menu().current.key
 
 
 # ------------------------------------------------------------------------------------------------ 6 parallel
@@ -1976,7 +1918,7 @@ class SaveScreen(Base):
                  ("Pictures", "on" if s.vision not in ("off", "no") else "off"),
                  *([("Drafting", "off" if s.drafting == "off" else "DFly2 (built-in)")] if is_hy4 else
                    [("Drafting", "off" if s.drafting == "off" else "DSpark Block-8 (built-in)")] if is_inkling else
-                   [("Drafting", dict(DraftingScreen.CHOICES).get(s.drafting or ("off" if modelstate.layer_off_without_choice(self.ctx.base_config()) else "auto"), "Auto (recommended)"))] if drafting_choice_available(self.ctx) else []),
+                   [("Drafting", dict(DraftingScreen.CHOICES).get(s.drafting or ("off" if modelstate.layer_off_without_choice(self.ctx.base_config()) else "auto"), "DFlash2 Q4_0 (default)"))] if drafting_choice_available(self.ctx) else []),
                  *([("Parallel", f"{s.parallel} at a time" if s.parallel else f"fit to your card ({8 if (self.ctx.computer.main_vram_gb or 0) >= 22 else 4 if (self.ctx.computer.main_vram_gb or 0) >= 15 else 1})")] if is_inkling else
                    [] if is_hy4 else [
                      ("Parallel", f"{s.parallel} at a time" if s.parallel else f"fit to your card ({fit_parallel_for(self.ctx.catalog, s, self.ctx.computer.main_vram_gb)})"),

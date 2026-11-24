@@ -405,6 +405,8 @@ struct GpuPlanSink {
     /// staging (0: staging).  staging_cap entries.
     unsigned long long* dst2 = nullptr;
     unsigned long long staging = 0;
+    uint8_t* host_staging = nullptr;        ///< bounded host transfer buffer for GPU-only expert misses
+    const uint8_t* mapped_staging = nullptr; ///< the same buffer's device address
     int64_t staging_cap = 0;
     int64_t cap = 0;
     void (*publish)(void* ctx) = nullptr;
@@ -520,6 +522,7 @@ struct ExpertDispatch {
     RouterLookahead* lookahead = nullptr;   ///< CS-T: warms the next layer's predicted file-tier experts
     RemoteExperts* remote[3] = {}; ///< optional CUDA1..3 tiers for otherwise CPU-served rows
     int remote_count = 0;
+    bool gpu_only = false;   ///< route every expert to the GPU, including cache misses
     int64_t n_expert = strata::kernels::cpu::NE;
 
     /// Counters, for the driver to report rather than for control flow.

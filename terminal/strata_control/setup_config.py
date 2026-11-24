@@ -263,37 +263,11 @@ def config_for(inp: SetupInputs, lib) -> SetupConfig:
         # decode on English prompts here (16 samples a cell, 90% interval [1.018, 1.049])
         say("  Tip: for English or code only, --draft-vocab en measured +3.1% decode on this part (the default keeps Chinese, Japanese "
             "and Korean drafts).")
-    disk = None if is_wsl() else rotational_disk(ple)  # #605 (WSL's virtual disk says rotational)
+    disk = None if is_wsl() else rotational_disk(ple)
     if disk:
-        tensor = None if ready else next((t for t in GGUFFile(ple).tensors if t.name == "per_layer_token_embd.weight"), None)
-        size = ple.stat().st_size if ready else getattr(tensor, "expected_bytes", lambda: None)()
-        table_gb = size / 1e9 if size else 28.8
-        if ram >= MODELS[model]["ram_gb"] + table_gb + 4:
-            args += ["--ple-io", "ram"]
-            ok(f"the model is on a rotational disk ({disk}): its {table_gb:.0f} GB n-gram table is kept in RAM "
-               "(--ple-io ram) - read from the disk at random, it can stall prompts for minutes (#605)")
-        else:
-            warn(f"the model is on a rotational disk ({disk}): its n-gram table is read from it at random, which can "
-                 f"stall prompts for minutes (#605). An SSD is recommended; with ~{table_gb:.0f} GB more RAM, "
-                 "--ple-io ram in the config's args keeps the table in RAM instead")
-    elif not low_ram and ple_ram_platform_ok():
-        # 147-verify: on an SSD too, a PC with RAM to spare keeps the n-gram table in RAM: a new prompt's first chunk then
-        # does not wait for its table rows (65,536 random SSD reads at 4K tokens).  RTX PRO 5000 (Linux, NVMe, fresh engine
-        # per prompt, 3 rounds, the same bits): prompt 4K 1298 -> 1059 ms (-18%), 20K 4644 -> 4223 ms (-9%), 98K 20447 ->
-        # 20027 ms (-2%), decode +0.8%.  On a card whose prompt is slow (R9700) the read hides behind layer 0 and nothing
-        # changes.  It costs the table's size in RAM, so only with 16 GB to spare beyond the model's own need; a smaller PC
-        # keeps reading from the SSD as before.
-        try:
-            tensor = None if ready else next((t for t in GGUFFile(ple).tensors if t.name == "per_layer_token_embd.weight"), None)
-            size = ple.stat().st_size if ready else getattr(tensor, "expected_bytes", lambda: None)()
-        except Exception:
-            size = None
-        table_gb = size / 1e9 if size else 28.8
-        if ram >= MODELS[model]["ram_gb"] + table_gb + 16:
-            args += ["--ple-io", "ram"]
-            ok(f"{ram:.0f} GB of RAM: the {table_gb:.0f} GB n-gram table is kept in RAM (--ple-io ram), so a new prompt does "
-               "not wait for its rows from the SSD (a 4K prompt about 18% sooner on a fast card); remove --ple-io ram from "
-               "the config's args to read it from the SSD instead")
+        lib.fail(f"The n-gram file is on a rotational disk ({disk}). Move the model files to an SSD.")
+    args += ["--ple-io", "direct"]
+    ok("N-gram storage: direct SSD reads")
     # KV streaming: from 64K up the whole KV cache lives in RAM and only the part the attention reads (32K positions
     # per layer) stays in VRAM; the VRAM it frees holds more experts (+6% at 128K, +23% at 262K with Q2_0). It
     # costs ~13.7 KB of RAM per context token with 8-bit KV (1.7 GB at 128K), 10.6 KB with K8V4, 7.5 KB with 4-bit, so only

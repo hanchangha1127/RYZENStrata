@@ -497,6 +497,10 @@ class LaunchApp(App):
 
     def run_launch(self, confirmed: bool = False) -> None:
         s = self.ctx.settings
+        from strata_control import ryzen_policy
+
+        if ryzen_policy.launch_problem(s) is None:
+            ryzen_policy.set_launch_defaults(s)
         self.cancel = threading.Event()
         self.runner = Runner(s, catalog=self.ctx.catalog, emit=self._emit, cancel=self.cancel, feed=self.ctx.feed, confirm=self._ask_from_run,
                              move_data=self.ctx.move_data, retune=self.ctx.retune, restart=self.ctx.restart,

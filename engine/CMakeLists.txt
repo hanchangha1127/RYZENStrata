@@ -1,17 +1,21 @@
-# Strata Engine - top-level build.
-#
-# One project builds the engine for every backend: CUDA (STRATA_ENABLE_CUDA), HIP (STRATA_ENABLE_HIP; the layer-split
-# engine is the STRATA_BUILD_SPLIT option), the CPU-only build, and the test
-# programs.  The Intel Arc (SYCL) engine is a separate project in sycl/ (STRATA_ENABLE_SYCL), and the Metal engine
-# one in metal/.  CMakePresets.json has the CPU check preset (`cmake --preset cpu-check`) and the compile-only
-# backend presets used by tools/check and the CI workflows; the release scripts in packaging/ pass their own flags.
-#
-# The CUDA kernels need sm_80 or newer (tf32 mma, bf16 math) and the guard below refuses anything older: silently
-# building for a pre-Ampere arch would produce a binary that runs and is wrong about its own performance, which is
-# the worst of both outcomes.
+# RYZENStrata builds the gfx1151 HIP product. The cpu-check presets build host tests without that product.
 cmake_minimum_required(VERSION 3.24)
 project(strata VERSION 0.1.67 LANGUAGES CXX)
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/strata_geometry.cmake)   # -DSTRATA_GEOMETRY=<name>: the model shape the kernels are compiled for (default flash_next, no flag added)
+option(RYZENSTRATA_TEST_ONLY "Configure host-side tests without a HIP toolchain" OFF)
+option(STRATA_ENABLE_HIP "Build the RYZENStrata HIP engine" ON)
+if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_SYCL OR STRATA_HIP_GFX906 OR STRATA_BUILD_SPLIT OR
+   STRATA_BUILD_HY4 OR STRATA_BUILD_INKLING OR STRATA_BUILD_INKLING2)
+  message(FATAL_ERROR "RYZENStrata builds only the Flash-Next engine for the gfx1151 HIP backend")
+endif()
+if(NOT STRATA_GEOMETRY STREQUAL "flash_next" OR STRATA_GEOMETRY_FILE)
+  message(FATAL_ERROR "RYZENStrata builds only the Flash-Next model geometry")
+endif()
+if(RYZENSTRATA_TEST_ONLY)
+  set(STRATA_ENABLE_HIP OFF)
+elseif(NOT STRATA_ENABLE_HIP)
+  message(FATAL_ERROR "RYZENStrata requires HIP. Use the cpu-check preset for host-side tests.")
+endif()
 # The build is cut by backend (cleanup 5.4): each file below only DEFINES macros (strata_<part>()), which run here, in this scope, at the place their
 # block used to be - so this file reads in the order the old single CMakeLists.txt evaluated.
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/strata_ggml.cmake)          # which ggml: the vendored third_party/strata-ggml, or -DSTRATA_GGML_DIR
@@ -23,14 +27,6 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/strata_gpu_engine.cmake)    # the GPU 
 # EXPERIMENTAL: the Intel Arc engine, the SYCL port in sycl/ (PR #423; icpx + oneMKL, docs/INTEL_ARC.md). It is its
 # own project that takes the unported sources from src/; with this on, nothing below is configured.
 option(STRATA_ENABLE_SYCL "EXPERIMENTAL: build the Intel Arc (SYCL) engine from sycl/ - docs/INTEL_ARC.md" OFF)
-if(STRATA_ENABLE_SYCL)
-  if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
-    message(FATAL_ERROR "STRATA_ENABLE_SYCL is a separate backend; leave STRATA_ENABLE_CUDA and STRATA_ENABLE_HIP off")
-  endif()
-  message(WARNING "STRATA_ENABLE_SYCL: the Intel Arc engine is experimental (community port, docs/INTEL_ARC.md)")
-  add_subdirectory(sycl)
-  return()
-endif()
 add_compile_definitions(STRATA_VERSION="${PROJECT_VERSION}")
 # issue #31: release builds keep a PDB beside the exe (not shipped in it), so a minidump from a stalled engine can
 # be read back to the exact source line
@@ -101,7 +97,6 @@ if(STRATA_HIP_GFX906)
   endif()
   set(STRATA_ENABLE_CUDA ON CACHE BOOL "" FORCE)
 endif()
-option(STRATA_ENABLE_HIP "Build the HIP targets for wave32 AMD GPUs (gfx1100, gfx1201; gfx1012/gfx1030 unvalidated)" OFF)
 # llama.cpp's MMQ prompt kernels are no longer in the tree (0.2.16): every CUDA and HIP build compiles Strata's own prompt kernels (strata_pf_own)
 # and the FP16 path.  MMQ comparison builds come from the v0.2.15 tag.
 # The community-made AMD changes (include/strata/core/amd_community.hpp): on by default.  This option is the build half of the one
@@ -147,6 +142,13 @@ if(STRATA_ENABLE_CUDA AND STRATA_ENABLE_HIP AND NOT STRATA_HIP_GFX906)
   message(FATAL_ERROR "STRATA_ENABLE_CUDA and STRATA_ENABLE_HIP are separate backends; enable only one")
 endif()
 if(STRATA_ENABLE_HIP)
+  if(NOT CMAKE_HIP_ARCHITECTURES)
+    set(CMAKE_HIP_ARCHITECTURES gfx1151 CACHE STRING "RYZENStrata HIP architecture" FORCE)
+  endif()
+  if(NOT CMAKE_HIP_ARCHITECTURES MATCHES "^gfx1151(:[^ ;]+)?$")
+    message(FATAL_ERROR "RYZENStrata supports only CMAKE_HIP_ARCHITECTURES=gfx1151")
+  endif()
+  add_compile_definitions(STRATA_RYZEN_PROFILE=1)
   include(cmake/hip_backend.cmake)
 endif()
 # Tests are on by default when the build can run them.  What they need: their sources (src/**/*_test.cpp, tests/core,
@@ -156,10 +158,13 @@ endif()
 # a missing GPU is a stated skip and never a silent pass.  Release builds say -DSTRATA_BUILD_TESTS=OFF themselves
 # (packaging/, setup.py, Dockerfile, spark/).
 set(_strata_tests_default OFF)
-if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/core AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/bench/micro AND STRATA_CPU_X86)
+if(RYZENSTRATA_TEST_ONLY AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/core AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/bench/micro AND STRATA_CPU_X86)
   set(_strata_tests_default ON)
 endif()
 option(STRATA_BUILD_TESTS "Build the test suite" ${_strata_tests_default})
+if(STRATA_ENABLE_HIP AND STRATA_BUILD_TESTS)
+  message(FATAL_ERROR "Use the cpu-check presets for host-side tests. The HIP product omits the CPU inference kernels used by the upstream parity suite.")
+endif()
 # A test that needs a model file (a real expert blob from a pack, which is not in the source tree): registered as the real test
 # when the file is there, and otherwise as a stated skip that ctest lists as "Skipped" with this reason, never as a pass of nothing
 # and not as a failure on a machine that has no pack.
@@ -713,7 +718,16 @@ target_link_libraries(strata-plan PRIVATE strata_plan)
 # Only built when a GPU backend is on, so the Phase 1 targets keep working without a toolkit.
 strata_gpu_engine()
 
-strata_cpu_kernels()
+if(STRATA_ENABLE_HIP)
+  find_package(Threads REQUIRED)
+  add_library(strata_host_support STATIC
+    src/kernels/cpu/expert_layout.cpp src/kernels/cpu/pool.cpp
+    src/kernels/cpu/hadamard.cpp src/kernels/cpu/portable.cpp)
+  target_include_directories(strata_host_support PUBLIC include)
+  target_link_libraries(strata_host_support PUBLIC Threads::Threads)
+else()
+  strata_cpu_kernels()
+endif()
 
 # ---- plan v0.3 P6: the i-quant models' CPU experts (IQ2_XS / IQ3_XXS files) ----
 #
@@ -726,13 +740,15 @@ if(STRATA_NATIVE_EXPERTS)
   enable_language(C)
   # ggml-base / ggml-cpu only where something links them: the tests (ggml as the oracle) and the ggml-cpu pool (STRATA_OWN_CPU_QUANT=OFF).
   # A release engine (tests off, Strata's own pool) configures, builds and links no ggml; the ggml tools below exist only with it.
-  if(STRATA_BUILD_TESTS OR NOT STRATA_OWN_CPU_QUANT)
+  if(RYZENSTRATA_TEST_ONLY AND (STRATA_BUILD_TESTS OR NOT STRATA_OWN_CPU_QUANT))
     strata_ggml_configure_root()
   else()
     set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)   # (what strata_ggml_configure_root sets for the whole project)
-    message(STATUS "Strata: no ggml in this build (own CPU pool, no MMQ, tests off)")
+    message(STATUS "Strata: no ggml in this build")
   endif()
-  strata_cpu_native_experts()
+  if(RYZENSTRATA_TEST_ONLY)
+    strata_cpu_native_experts()
+  endif()
   strata_quant_layer()
   if(STRATA_ENABLE_CUDA)
     strata_cuda_pf_own()   # Strata's own prompt kernels
@@ -998,8 +1014,8 @@ if(STRATA_BUILD_HY4)
 endif()
 
 # ---- strata-inkling: standalone Inkling-2-Mini (.strata v1.1) shape-engine binary (CMake component `inkling2`) ----
-option(STRATA_BUILD_INKLING "Build strata-inkling: Inkling-2-Mini (.strata v1.1) looped MoE engine (alias of STRATA_BUILD_INKLING2)" ON)
-option(STRATA_BUILD_INKLING2 "Build strata-inkling: Inkling-2-Mini (.strata v1.1) looped MoE engine + Vision + 1..64 continuous batching" ON)
+option(STRATA_BUILD_INKLING "Build strata-inkling: Inkling-2-Mini (.strata v1.1) looped MoE engine (alias of STRATA_BUILD_INKLING2)" OFF)
+option(STRATA_BUILD_INKLING2 "Build strata-inkling: Inkling-2-Mini (.strata v1.1) looped MoE engine + Vision + 1..64 continuous batching" OFF)
 if((STRATA_BUILD_INKLING AND STRATA_BUILD_INKLING2) AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/inkling2/CMakeLists.txt")
   add_subdirectory(src/inkling2)
 endif()

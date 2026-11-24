@@ -486,9 +486,33 @@ void act_quant_any(const float* x, int n, ActQ& a) {
 }
 
 #if !defined(STRATA_NATIVE_EXPERTS)
+#if defined(STRATA_RYZEN_PROFILE)
+bool native_experts_available() noexcept { return true; }
+bool native_fmt(int gate_type, int down_type, int64_t hidden, int64_t inner, NativeFmt& f, std::string& err) {
+    constexpr int q2_0 = 42, q8_0 = 8;
+    if (gate_type != q2_0 || down_type != q2_0 || hidden <= 0 || inner <= 0 || hidden % 64 || inner % 64) {
+        err = "RYZENStrata requires the native Q2_0 expert layout";
+        return false;
+    }
+    f = {};
+    f.gu_type = f.d_type = q2_0;
+    f.gu_act = f.d_act = q8_0;
+    f.n_embd = hidden;
+    f.n_ff = inner;
+    f.gu_row = (size_t) (hidden / 64) * 18;
+    f.d_row = (size_t) (inner / 64) * 18;
+    f.up_off = f.gu_row * (size_t) inner;
+    f.down_off = 2 * f.up_off;
+    f.bytes = f.down_off + f.d_row * (size_t) hidden;
+    f.act_bytes = (size_t) (hidden / 32) * 34;
+    f.h_bytes = (size_t) (inner / 32) * 34;
+    return true;
+}
+#else
 // Without ggml-cpu no native pack loads (expert_layout_load refuses), so these are never reached.
 bool native_experts_available() noexcept { return false; }
 bool native_fmt(int, int, int64_t, int64_t, NativeFmt&, std::string& err) { err = "built without native experts"; return false; }
+#endif
 void native_quant_act(const NativeFmt&, const float*, void*) { std::abort(); }
 void native_quant_h(const NativeFmt&, const float*, void*) { std::abort(); }
 int native_gu_mt_min(int) { return 2; }
@@ -509,7 +533,7 @@ bool expert_layout_load(const std::string& pack_dir, int64_t n_layers, int64_t n
         g_layout = L;
         return true;
     }
-#if !defined(STRATA_NATIVE_EXPERTS)
+#if !defined(STRATA_NATIVE_EXPERTS) && !defined(STRATA_RYZEN_PROFILE)
     err = "this pack has native (IQ) experts but the engine was built without STRATA_NATIVE_EXPERTS";
     return false;
 #else

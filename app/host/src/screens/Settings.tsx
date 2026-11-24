@@ -17,6 +17,7 @@ import { PromptCacheSpreadSetting } from '../components/PromptCacheSpreadSetting
 import { CompactionSetting } from '../components/CompactionSetting';
 import { ContextOptimizerSetting } from '../components/ContextOptimizerSetting';
 import { RamReserveSetting } from '../components/RamReserveSetting';
+import { useNative } from '../lib/native';
 import { HelperLimitSetting } from '../components/HelperLimitSetting';
 import { ChatDefaultsSetting } from '../components/ChatDefaultsSetting';
 import { LANGUAGES } from '../lib/i18n';
@@ -28,7 +29,9 @@ const panelId = (name: typeof PANELS[number]['name']) => name.replaceAll(' ', '-
 export function SettingsScreen() {
     const prefs = useStore(s => s);
     const [shell, saveShell] = useShellState();
-    const active = prefs.settingsSection;
+    const ryzen = useNative()?.ryzenEdition === true;
+    const panels = ryzen ? PANELS.filter(panel => panel.name !== 'Models') : PANELS;
+    const active = ryzen && prefs.settingsSection === 'Models' ? 'Appearance' : prefs.settingsSection;
     const scrollRef = useRef<HTMLDivElement>(null);
     const fields: {
         section: string;
@@ -73,24 +76,24 @@ export function SettingsScreen() {
             if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key))
                 return;
             e.preventDefault();
-            const index = PANELS.findIndex(p => p.name === active);
-            const next = e.key === 'Home' ? 0 : e.key === 'End' ? PANELS.length - 1 : (index + (['ArrowDown', 'ArrowRight'].includes(e.key) ? 1 : -1) + PANELS.length) % PANELS.length;
-            activate(PANELS[next].name);
-            document.getElementById(`settings-tab-${panelId(PANELS[next].name)}`)?.focus();
+            const index = panels.findIndex(p => p.name === active);
+            const next = e.key === 'Home' ? 0 : e.key === 'End' ? panels.length - 1 : (index + (['ArrowDown', 'ArrowRight'].includes(e.key) ? 1 : -1) + panels.length) % panels.length;
+            activate(panels[next].name);
+            document.getElementById(`settings-tab-${panelId(panels[next].name)}`)?.focus();
         }}>
-      {tr(PANELS.map(panel => <button key={panel.name} role="tab" id={`settings-tab-${panelId(panel.name)}`} aria-controls={`settings-panel-${panelId(panel.name)}`} aria-selected={active === panel.name} tabIndex={active === panel.name ? 0 : -1} className="settingsindex__item" onClick={() => activate(panel.name)}><Icon name={panel.icon as IconName} size={17}/>{tr(panel.name)}</button>))}
+      {tr(panels.map(panel => <button key={panel.name} role="tab" id={`settings-tab-${panelId(panel.name)}`} aria-controls={`settings-panel-${panelId(panel.name)}`} aria-selected={active === panel.name} tabIndex={active === panel.name ? 0 : -1} className="settingsindex__item" onClick={() => activate(panel.name)}><Icon name={panel.icon as IconName} size={17}/>{tr(panel.name)}</button>))}
     </nav>
     <div className="settings-pane" ref={scrollRef}>
-      {tr(PANELS.map(panel => <div key={panel.name} role="tabpanel" tabIndex={0} id={`settings-panel-${panelId(panel.name)}`} aria-labelledby={`settings-tab-${panelId(panel.name)}`} hidden={active !== panel.name}>
+      {tr(panels.map(panel => <div key={panel.name} role="tabpanel" tabIndex={0} id={`settings-panel-${panelId(panel.name)}`} aria-labelledby={`settings-tab-${panelId(panel.name)}`} hidden={active !== panel.name}>
         {tr(panel.name === 'Models' ? <SettingsModels /> : panel.name === 'Tools' ? (active === panel.name ? <SettingsTools /> : null) : panel.name === 'Engine' && active === panel.name ? <div className="stack stack--lg settings-body"><section className="settings-section"><h2 className="h3" style={{ marginBottom: 14 }}>{tr("Engine")}</h2><NativeOperations /></section></div> : active === panel.name ? <div className="stack stack--lg settings-body">
-          {tr(panel.sections.map(section => <section className="settings-section" key={section}>
+          {tr(panel.sections.filter(section => !ryzen || section !== 'Update').map(section => <section className="settings-section" key={section}>
             <h2 className="h3" style={{ marginBottom: 14 }}>{tr(section)}</h2>
             <div className="st-card st-card--flush">
               {tr(section === 'About' ? <div className="settings-about-brand"><Brand variant="lockup" height={28}/><AboutVersions/></div> : null)}
               {tr(section === 'Storage' ? <SettingsStorage /> : null)}
               {tr(section === 'Privacy' ? <PrivacyNotes /> : null)}
               {tr(section === 'Update' ? <SettingsUpdates /> : null)}
-              {tr(fields.filter(f => f.section === section).map(f => <Field key={f.label} label={tr(f.label)} hint={tr(f.hint)}>{tr(f.control)}</Field>))}
+              {tr(fields.filter(f => f.section === section && (!ryzen || f.label !== 'Context Optimizer (experimental)')).map(f => <Field key={f.label} label={tr(f.label)} hint={tr(f.hint)}>{tr(f.control)}</Field>))}
             </div>
           </section>))}
         </div> : null)}

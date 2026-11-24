@@ -11,7 +11,7 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { componentsDirectory } from './control-runtime.mjs';
 
-export const DEFAULT_PORT = 47831;
+export const DEFAULT_PORT = process.env.STRATA_RYZEN_EDITION === '1' ? 47841 : 47831;
 export const LANGUAGES = ['en', 'zh', 'ja', 'de', 'fr', 'es', 'ru', 'pt', 'ko', 'he'];
 export const DEFAULTS = Object.freeze({ port: 0, tray: false, language: 'en' });
 

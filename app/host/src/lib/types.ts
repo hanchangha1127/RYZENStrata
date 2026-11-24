@@ -549,7 +549,7 @@ export interface WorkspaceFile {
 export interface SetupState {
   flowVersion?: number;
   dismissed?: boolean;
-  choices?: { onboarding?: { step:number; family?:string; size?:string; context?:number; vision?:boolean; directory?:string; profile?:'work'|'performance'; installJobId?:string; tuneJobId?:string; calibrate?:boolean; manual?:boolean }; variantId?: string; contextLength?: BeginnerConfig["contextLength"]; profile?: import("./experience").Profile; batch?: number; batchAuto?: boolean };
+  choices?: { onboarding?: { step:number; family?:string; size?:string; context?:number; vision?:boolean; directory?:string; ggufDir?:string; profile?:'work'|'performance'; installJobId?:string; tuneJobId?:string; calibrate?:boolean; manual?:boolean }; variantId?: string; contextLength?: BeginnerConfig["contextLength"]; profile?: import("./experience").Profile; batch?: number; batchAuto?: boolean };
   complete: boolean;
   step: number;
   completedAt?: string;

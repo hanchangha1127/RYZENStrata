@@ -68,7 +68,8 @@ export function createAppUi({ env = process.env, shutdown = () => {}, open = ope
   const originalBridge = createUpdater({ env });   // the older way: the shell passed the bridge in the environment
 
   /** The shell's updater as the rest of the host sees it, or null when no app started this host. */
-  const updater = mode === null && !originalBridge ? null : {
+  const updaterDisabled = env.STRATA_RYZEN_EDITION === '1';
+  const updater = updaterDisabled || (mode === null && !originalBridge) ? null : {
     get unavailable() { return mode === 'browser' ? BROWSER_UPDATE_MESSAGE : null; },
     async check() { return (await current()).check(); },
     async install(options) { return (await current()).install(options); },
@@ -83,7 +84,7 @@ export function createAppUi({ env = process.env, shutdown = () => {}, open = ope
     updater,
     get mode() { return mode; },
     /** What the page reads to decide what to show. */
-    state: () => ({ mode, reason, canQuit: mode === 'browser', appUpdate: mode === 'browser' || mode === null ? 'unavailable' : 'available' }),
+    state: () => ({ mode, reason, canQuit: mode === 'browser', appUpdate: updaterDisabled || mode === 'browser' || mode === null ? 'unavailable' : 'available' }),
     async openHelper(sessionId, helperId, name) {
       const shell = mode === 'window' ? bridge ?? originalBridge : null;
       return shell?.openHelper ? shell.openHelper(sessionId, helperId, name) : { opened: false };

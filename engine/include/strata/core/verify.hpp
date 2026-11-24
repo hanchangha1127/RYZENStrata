@@ -429,6 +429,7 @@ public:
     /// arena directly, 2 = a copy kernel stages it inside the graph (no API calls on the pool's thread; best when
     /// the CPU is RAM-bound, Q2_0).  Set before the first `run`.
     void set_pcie_mode(int mode) { sink_.pcie_mode = mode; }
+    void set_gpu_experts_only(bool on) { gpu_experts_only_ = on; }
     /// Called before every window this verifier launches (run, the batch and pipelined launches): the device's
     /// residency table catches up with the host's (the adaptive tier's evictions while its copies are in flight,
     /// STRATA_ADAPT_FETCH's admissions).
@@ -463,6 +464,7 @@ public:
     std::string route_stats_report();
 
 private:
+    bool gather_ple_rows(strata::kernels::PleTable& table, const uint32_t* rows, size_t tokens, std::string& err);
     RemoteExpertOpt* remote_opt_ = nullptr;
     bool capture(int T, std::string& err);
     // batch windows (see init_slots)
@@ -703,6 +705,9 @@ private:
     int32_t* h_pos_ = nullptr;   int32_t* m_pos_ = nullptr;     // T * n_head
     int32_t* h_commit_ = nullptr; int32_t* m_commit_ = nullptr; // [n_keep, n_keep-1, pos_0 .. pos_{T-1}]
     float* h_ple_ = nullptr;     float* m_ple_ = nullptr;       // T * n_embd
+    uint8_t* h_expert_stage_ = nullptr;
+    uint8_t* m_expert_stage_ = nullptr;
+    bool gpu_experts_only_ = false;
     int32_t* h_out_ = nullptr;   int32_t* m_out_ = nullptr;     // T argmax ids
     // STRATA_TAP_FILE (off by default; nothing is allocated or captured without it): the DFlash2 experiment's hook.
     // After each layer in STRATA_TAP_LAYERS (default 5,15,25,35,45) the window copies the layer's completed output
@@ -791,7 +796,7 @@ private:
     int32_t *ids_ = nullptr, *hit_slot_ = nullptr, *hit_dst_ = nullptr, *hit_count_ = nullptr;
     int32_t* plan_ = nullptr;                                     // device copy of the plan block
     uint8_t* staging_ = nullptr;                                  // VRAM slots for the PCIe share of the misses
-    static constexpr int64_t kStagingBlobs = 16;
+    int64_t staging_blobs() const { return gpu_experts_only_ ? 64 : 16; }
     static constexpr int64_t kPcieGroupRows = 4;                  // the PCIe call's groups side by side (of <= 16)
     uint8_t* hit_xq_ = nullptr;
     uint8_t* nat_xq_ = nullptr;   // plan v0.3 P6: q8_1 activations for a native pack's grouped experts

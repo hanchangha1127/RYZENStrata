@@ -14,13 +14,15 @@ import { existsSync, mkdirSync, readFileSync, renameSync, statSync, symlinkSync,
 import { homedir } from 'node:os';
 import { dirname, join, parse, resolve } from 'node:path';
 
+const modelFolderName = () => process.env.STRATA_RYZEN_EDITION === '1' ? 'RYZENStrata' : 'Strata';
+
 export const isDriveRoot = path => { const p = resolve(path); return p === parse(p).root; };
 
 /** The data folder for a picked folder: a drive root gets a `Strata` folder of its own. `{ path, note }`. */
 export function dataFolderFromPick(picked) {
   const path = resolve(picked);
   if (!isDriveRoot(path)) return { path, note: null };
-  const target = join(path, 'Strata');
+  const target = join(path, modelFolderName());
   return { path: target, note: `${path} is a whole drive, so the models go in ${target}.` };
 }
 
@@ -28,7 +30,7 @@ export function dataFolderFromPick(picked) {
 export function libraryFolderFromPick(picked) {
   const path = resolve(picked);
   if (!isDriveRoot(path)) return { path, note: null };
-  const target = join(path, 'Strata', 'Models');
+  const target = join(path, modelFolderName(), 'Models');
   return { path: target, note: `${path} is a whole drive, so the models go in ${target}.` };
 }
 
@@ -67,8 +69,9 @@ export function readDataFolder(file) {
 /** The settings file the Terminal (command-line Strata) keeps: the same place setup.py and strata_control/discovery.py use. */
 export function terminalSettingsFile(env = process.env, platform = process.platform) {
   if (env.STRATA_TERMINAL_SETTINGS_FILE) return env.STRATA_TERMINAL_SETTINGS_FILE;
-  if (platform === 'win32') return join(env.APPDATA || join(homedir(), 'AppData', 'Roaming'), 'Strata', 'settings.json');
-  return join(env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'strata', 'settings.json');
+  const ryzen = env.STRATA_RYZEN_EDITION === '1';
+  if (platform === 'win32') return join(env.APPDATA || join(homedir(), 'AppData', 'Roaming'), ryzen ? 'RYZENStrata' : 'Strata', 'settings.json');
+  return join(env.XDG_CONFIG_HOME || join(homedir(), '.config'), ryzen ? 'ryzenstrata' : 'strata', 'settings.json');
 }
 
 /** Write the person's data folder into a settings file (merged, atomically) with the time of the change; returns whether it changed. Never

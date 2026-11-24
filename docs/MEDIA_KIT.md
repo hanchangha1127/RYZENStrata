@@ -15,7 +15,7 @@ Suggested opening: **“Run powerful AI on your own computer. Chat, code and wor
 1. **Show the desktop app.** A chat and a visible result explain the product quickly.
 2. **Show the choice of interfaces.** The desktop app for a visual workspace; the terminal app for keyboard-driven use.
 3. **Show the two model families.** Qwen3.8-Flash-Next and Qwen3.6-35B-A3B.
-   Explain the [availability limits](AI_REFERENCE.md#model-families).
+   Explain the [upstream availability limits](CAPABILITIES.md).
 4. **Choose a model for the machine.** Prefer ISTA-DASLab, then Unsloth, Gyro and other providers where compatible.
    Gyro is a memory-saving option, currently slower. State the model, quantization and hardware used in any live demo.
 5. **Connect a familiar tool.** Examples include Claude Code, Codex CLI, OpenCode, oh-my-pi, pi.dev and Hermes Agent.

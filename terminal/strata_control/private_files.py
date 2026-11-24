@@ -509,11 +509,11 @@ _SKIP_SUFFIXES = (".gguf", ".part", ".bin", ".safetensors", ".zip", ".exe", ".dl
 def known_roots() -> list[Path]:
     """Strata's per-user data folders: APPDATA/Strata, LOCALAPPDATA/Strata and ~/.strata (plus the STRATA_* overrides)."""
     roots: list[Path] = []
-    for key, sub in (("APPDATA", "Strata"), ("LOCALAPPDATA", "Strata")):
+    for key, sub in (("APPDATA", "RYZENStrata"), ("LOCALAPPDATA", "RYZENStrata")):
         value = os.environ.get(key)
         if value:
             roots.append(Path(value) / sub)
-    roots.append(Path.home() / ".strata")
+    roots.append(Path.home() / ".ryzenstrata")
     for key in ("STRATA_HOME", "STRATA_PROFILE_DIR", "STRATA_RUNTIME_DIR", "STRATA_STATE_DIR", "STRATA_INSTALL_DIR"):
         value = os.environ.get(key)
         if value:

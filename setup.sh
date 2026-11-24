@@ -1,9 +1,12 @@
 #!/bin/sh
-# Strata for Linux: the first run installs everything and starts the model; later runs just start it.
-# Needs only an NVIDIA driver (or, for an AMD Radeon card, the kernel's amdgpu driver: see docs/AMD_HIP.md).
+# RYZENStrata for native x86-64 Linux with an AMD Ryzen AI Max+ 395 or 495.
 # Python (with venv) is installed through apt/dnf if it is missing (asks for sudo).
 # NixOS (or STRATA_UV=1) with uv installed: uv makes the project venv; every other Linux uses the standard venv.
 cd "$(dirname "$0")" || exit 1
+if [ "$(uname -s)" != Linux ] || [ "$(uname -m)" != x86_64 ] || grep -qi microsoft /proc/sys/kernel/osrelease; then
+  echo "Use native x86-64 Linux or run START-HERE.bat on Windows." >&2
+  exit 1
+fi
 # the Terminal's sources and everything setup writes live in terminal/ (0.2.16 layout); an older clone's .venv moves there once
 if [ -f terminal/setup.py ]; then
   [ -e terminal/.venv ] || { [ -x .venv/bin/python ] && mv .venv terminal/.venv; }
@@ -40,19 +43,6 @@ if [ ! -x .venv/bin/python ]; then
         PY=$c; break
       fi
     done
-  fi
-  # macOS: the system Python is 3.9; a standalone Python 3.12 goes into .python (no sudo, no Homebrew; pinned)
-  if [ -z "$PY" ] && [ "$(uname -s)" = Darwin ]; then
-    if [ ! -x .python/python/bin/python3 ]; then
-      PBS="https://github.com/astral-sh/python-build-standalone/releases/download/20261009/cpython-3.12.15%2B20261009-aarch64-apple-darwin-install_only.tar.gz"
-      echo "Python 3.10+ is needed; downloading a standalone Python 3.12 into .python (25 MB) ..."
-      mkdir -p .python && curl -fL --retry 3 -o .python/python.tar.gz "$PBS" || { echo "could not download Python"; exit 1; }
-      if [ "$(shasum -a 256 .python/python.tar.gz | cut -d" " -f1)" != "83dcb04777c798bd95f3687acf9ae84b09860272ee6bdfb05be8bcf9447f75b8" ]; then
-        rm -f .python/python.tar.gz; echo "the Python download does not match its pinned SHA-256"; exit 1
-      fi
-      tar xzf .python/python.tar.gz -C .python && rm -f .python/python.tar.gz
-    fi
-    PY=.python/python/bin/python3
   fi
   if [ -z "$PY" ]; then
     echo "Python 3.10+ with venv is needed; installing it (sudo will ask for your password) ..."

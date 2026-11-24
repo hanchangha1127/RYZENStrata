@@ -9,6 +9,8 @@ export interface NativeField {id:string;label:string;group:string;type:'number'|
 export interface NativeJob {id:string;kind:string;guided?:boolean;model?:string;family?:string;state:'running'|'done'|'error'|'cancelled';startedAt:string;summary:string;error:string|null;details?:string;result:Record<string,any>|null;progress?:Record<string,any>|null;/** An engine update beside a loaded model: which step it is on and the models it concerns (the app words these itself). */step?:'getting-ready'|'stopping'|'stopped';models?:string[]}
 export interface NativeInstance {id:string;apiModelId:string;model:string;label:string;arch?:string|null;aliases?:string[];vision?:boolean;resourceProfile?:'work'|'performance'|null;context?:number;port:number;gpus:number[];status:'loading'|'ready'|'unloading'|'error';phase:string;loadedAt:string;error:string|null;/** One short line when the model was loaded without picture reading although it was on (no internet for the picture files, no room on the disk). */picturesNote?:string;metrics:Record<string,any>|null}
 export interface NativeState {
+  ryzenEdition?: boolean;
+  ryzenHardware?: { supported: boolean; error?: string | null; warning?: string | null } | null;
   /** The host has not had an answer from Control yet (it is still starting): not "nothing installed". */
   checking?: boolean;
   /** The picture reader (strata-vision) is installed with the engine, so models marked for pictures can read them here. */

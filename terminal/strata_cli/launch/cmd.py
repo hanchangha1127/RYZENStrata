@@ -10,15 +10,16 @@ import sys
 from pathlib import Path
 
 from strata_cli.launch import settings as S
+from strata_control import ryzen_policy
 
 EXAMPLES = """\
 examples:
   strata launch                                    open the guided screens (saved presets, then set up from the beginning)
-  strata launch --preset "IQ3_XXS 128K"            start a saved preset (opens the monitor)
-  strata launch --model iq3_xxs --context 128k --parallel 4 --vision off --tune quick \\
+  strata launch --preset "Q2_0 256K"            start a saved preset (opens the monitor)
+  strata launch --model q2_0 --context 256k \\
                 --access lan --port 8080 --save-preset "Office" --no-tui
                                                    set everything on the command line, serve, print the address
-  strata launch --model-path /data/models/IQ3_XXS --no-tui
+  strata launch --model-path /data/models/Q2_0 --no-tui
                                                    use model files you already have (a folder or one .gguf)
   strata launch --preset Office --set prefill=65536 --set STRATA_PIN_BY_NEED=1 --no-tui
                                                    change one advanced setting for this start
@@ -80,8 +81,8 @@ def add_parsers(sp: argparse._SubParsersAction) -> list[argparse.ArgumentParser]
                     "Presets are shared with the Strata app's profiles and tuning presets.")
     g = p.add_argument_group("what to run")
     g.add_argument("--preset", metavar="NAME", help="start a saved preset (other flags change it for this start)")
-    g.add_argument("--model", metavar="NAME", help="the model size, e.g. iq3_xxs, q2_0, ud-q4_k_xl (any case)")
-    g.add_argument("--family", metavar="NAME", help="the model family when a size is offered by several (qwen, swift, coder, ...)")
+    g.add_argument("--model", metavar="NAME", help="Q2_0 (any case)")
+    g.add_argument("--family", metavar="NAME", help="qwen (ISTA-DASLab Qwen3.8-Flash-Next)")
     g.add_argument("--dsv41-package", metavar="FILE", help=argparse.SUPPRESS)        # DeepSeek (no longer run): accepted, answered in plain words
     g.add_argument("--model-path", metavar="PATH", help="use model files you already have: a folder of shards or one .gguf file")
     g.add_argument("--data-dir", metavar="DIR", help="where downloaded model files are stored (default: Strata's data folder)")
@@ -89,44 +90,26 @@ def add_parsers(sp: argparse._SubParsersAction) -> list[argparse.ArgumentParser]
                    help="with --data-dir: move the models you already have into the new folder. Without it nothing is moved: your models stay "
                         "where they are and stay usable, and the new folder gets the new downloads")
     g.add_argument("--context", type=_context, metavar="SIZE", help="how much text it remembers at once: 32k, 64k, 128k, 256k or a number of tokens")
-    g.add_argument("--kv", type=_choice("a memory format", S.KV_MODES), metavar="FORMAT", help="conversation memory format: int8 (default), q4_0 (half the memory), k8v4, fp16 (Inkling-2-Mini: fp16, fp8; CUDA also k8v8, k8v4)")
-    g.add_argument("--vision", type=_choice("a picture setting", S.VISION_MODES), metavar="off|on|gpu|cpu",
-                   help="let the model read pictures. Default: on when the model can read pictures and the engine has the picture reader. "
-                        "'on' picks the reader by your graphics memory: the CPU reader under 24 GB, the GPU reader from 24 GB (any make); "
-                        "gpu / cpu choose one; off turns pictures off")
-    g.add_argument("--parallel", type=_parallel, metavar="N", help="requests answered at the same time, 1 to 64 (Inkling-2-Mini runs up to 64; the Qwen engine keeps 16 on NVIDIA and AMD cards and 8 elsewhere; Hy4-Flash answers one; default: fit to your graphics card; one request at a time with the DFlash2 drafter)")
-    g.add_argument("--mtp", type=_choice("a draft layer setting", S.MTP_MODES), metavar="on|off",
-                   help="the draft layer that makes answers faster. off starts without it: about 1 GB less graphics memory and less RAM, "
-                        "slower answers; use it when the engine stops at start on a small card or a PC with little RAM. Default: on")
-    g.add_argument("--drafting", type=_choice("a drafting setting", S.DRAFTING_MODES), metavar="auto|mtp|dflash2|off",
-                   help="which drafter guesses words ahead to make answers faster, one at a time: auto (recommended: DFlash2 for Qwen3.8-Flash-Next where the engine has it, "
-                        "else the MTP), mtp, dflash2 (downloads its drafter once, 0.3 to 1.2 GB depending on the model; the size is shown before the download) or off. Auto uses the MTP when several requests run at once; --drafting dflash2 runs with the --parallel count you set. "
-                        "If DFlash2 cannot run (on a model it is not for, for example) the MTP is used alone and the start says why")
+    g.add_argument("--kv", type=_choice("a memory format", S.KV_MODES), metavar="FORMAT", help="Q8 KV cache (int8)")
+    g.add_argument("--vision", type=_choice("a picture setting", S.VISION_MODES), help=argparse.SUPPRESS)
+    g.add_argument("--parallel", type=_parallel, help=argparse.SUPPRESS)
+    g.add_argument("--mtp", type=_choice("a draft layer setting", S.MTP_MODES), help=argparse.SUPPRESS)
+    g.add_argument("--drafting", type=_choice("a drafting setting", S.DRAFTING_MODES), metavar="dflash2|off",
+                   help="DFlash2 Q4_0 drafting (default) or off")
     g.add_argument("--draft-vocab", type=_choice("a draft vocabulary", S.DRAFT_VOCAB_MODES), metavar="cjk|en|cyrillic|fr|latin",
                    help="which tokens the drafter may guess: cjk (the default: with Chinese, Japanese and Korean), en (English and code), "
                         "cyrillic, fr or latin (each with English and code). Without it Strata picks from this computer's languages")
-    g.add_argument("--split-engine", type=_choice("a split-engine setting", S.SPLIT_MODES), metavar="auto|on|off",
-                   help="NVIDIA, two or more cards: the engine that splits every layer across the cards (faster answers). auto (the default) uses it by itself "
-                        "where it is supported and starts the normal layer split everywhere else; on asks for it and says in one line why it cannot run; "
-                        "off never uses it. Your choice is saved with the preset")
+    g.add_argument("--split-engine", type=_choice("a split-engine setting", S.SPLIT_MODES), help=argparse.SUPPRESS)
     g.add_argument("--speed", metavar="WORD", help=argparse.SUPPRESS)                # DeepSeek (no longer run): accepted, answered in plain words
     g.add_argument("--full-quality", action="store_true", help=argparse.SUPPRESS)    # DeepSeek (no longer run): accepted, answered in plain words
-    g.add_argument("--gpu", metavar="LIST", help="graphics card numbers to use, e.g. 0 or 0,1 (default: the engine's choice). "
-                   "With more than one card the engine decides which is the Main card; --gpu-roles (instead of --gpu) sets the roles yourself.")
-    g.add_argument("--backend", metavar="nvidia|amd|intel|auto",
-                   help="which make of graphics card the engine uses on a PC that has cards of more than one make (default: auto = NVIDIA first, "
-                        "then AMD, then Intel). Your choice is remembered for the next launch, update and app; 'auto' forgets it")
-    g.add_argument("--gpu-roles", metavar="LIST", help="a role for each graphics card: main, helper or off, e.g. 1=main,0=helper (cards you do not name are off). "
-                   "Main does the last steps of every answer; a helper holds part of the model")
-    g.add_argument("--tune", type=_choice("a tuning mode", S.TUNE_MODES), metavar="quick|thorough|skip", help="find the fastest settings first (default: skip)")
-    g.add_argument("--tune-allow-small", action="store_true", help="let the tuner also try settings that can change answers very slightly")
+    g.add_argument("--gpu", metavar="INDEX", help="select the integrated AMD gfx1151 device by index")
+    g.add_argument("--backend", help=argparse.SUPPRESS)
+    g.add_argument("--gpu-roles", help=argparse.SUPPRESS)
+    g.add_argument("--tune", type=_choice("a tuning mode", S.TUNE_MODES), help=argparse.SUPPRESS)
+    g.add_argument("--tune-allow-small", action="store_true", help=argparse.SUPPRESS)
     g.add_argument("--dspark", metavar="WORD", help=argparse.SUPPRESS)               # DeepSeek (no longer run): accepted, answered in plain words
-    g.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
-                   help="an advanced engine setting or STRATA_* variable, e.g. prefill=65536 (repeat); unknown names get a warning, not a refusal")
-    g.add_argument("--pool-cores", metavar="LIST",
-                   help="experimental: pin the CPU workers to exactly these logical processors, e.g. 2,4,6,8 or 2-14:2 (the numbers Task Manager or "
-                        "lscpu show). The default is one worker per physical core, which the engine's start line names; "
-                        "two entries on one core are kept with a warning")
+    g.add_argument("--set", action="append", default=[], help=argparse.SUPPRESS)
+    g.add_argument("--pool-cores", help=argparse.SUPPRESS)
     a = p.add_argument_group("who can use it")
     a.add_argument("--access", type=_choice("a way to share Strata", S.ACCESS_KINDS), metavar="local|lan|address|cloudflare|tailscale",
                    help="local: this computer only; lan: your network; address: one address of this computer (see --listen); "
@@ -140,17 +123,15 @@ def add_parsers(sp: argparse._SubParsersAction) -> list[argparse.ArgumentParser]
     a.add_argument("--no-api-key", action="store_true", help="share beyond this computer without an API key (a warning is shown, nothing is refused)")
     o = p.add_argument_group("running")
     o.add_argument("--save-preset", metavar="NAME", help="save these choices under this name")
-    o.add_argument("--retune", action="store_true",
-                   help="with --tune (quick is used when --tune is not given): measure again even when this model was already tuned on this computer "
-                        "(by default a stored tuning result is reused and no measuring is done)")
+    o.add_argument("--retune", action="store_true", help=argparse.SUPPRESS)
     o.add_argument("--restart", action="store_true",
                    help="when a model is already serving other choices (or holds the port), stop it and start these. Without it the screens ask once "
                         "and --no-tui refuses; --yes alone never restarts. The same choices are never restarted: the running address is printed")
     o.add_argument("--no-tui", action="store_true", help="no screens: serve, print the address and return")
     o.add_argument("--open", action="store_true", help="open the server's web page in your browser once it is serving (nothing opens a browser without this)")
-    o.add_argument("--yes", action="store_true", help="do not ask questions (for one: whether to download the model on a computer with no engine yet)")
+    o.add_argument("--yes", action="store_true", help="accept the default setup and download choices")
     o.add_argument("--plan", action="store_true", help="show what would happen and exit; nothing is changed")
-    o.add_argument("--feed", metavar="URL|DIR", help="where the signed update feed (engine downloads) is; default: STRATA_UPDATE_FEED or the project's")
+    o.add_argument("--feed", help=argparse.SUPPRESS)
     o.add_argument("--output", choices=("human", "json"), default="human")
     m = p.add_argument_group("manage")
     m.add_argument("--list-presets", action="store_true", help="list saved presets")
@@ -235,7 +216,7 @@ def settings_from_args(a: argparse.Namespace, catalog=None) -> tuple[S.LaunchSet
         s.family, s.model = catalog.resolve(a.model, a.family)
         if not a.model_path:
             s.model_path = None
-    elif a.family and s.model:
+    elif a.family:
         s.family = a.family
     if a.data_dir:
         from strata_control import folders
@@ -346,59 +327,12 @@ def apply_defaults(s: S.LaunchSettings, catalog) -> tuple[S.LaunchSettings, list
     notices: list[S.Notice] = []
     comp = catalog.computer()
     hw = comp.raw
-    if not (s.family and s.model) and not s.model_path:
-        rec = catalog.recommendation(hw)
-        if rec.get("model"):
-            s.family, s.model = rec["family"], rec["model"]
-            notices.append(S.Notice("warn", f"No model was named, so Strata picked {rec['title']} for this computer ({rec['why']}).", ""))
-        else:
-            notices.append(S.Notice("error", "No model fits this computer by Strata's rules, and none was chosen.",
-                                    "Name one with --model (strata launch --help lists them); a bigger one will run slowly."))
-    try:
-        from strata_control import engine_component as _ec
-        _b, _how = _ec.detect_backend()
-        if _how == "saved choice":
-            notices.append(S.Notice("warn", f"The engine for {_ec.MAKE_NAMES.get(_b, _b)} cards is used (your saved choice). "
-                                            "`strata launch --backend auto` goes back to the PC's own choice.", ""))
-    except Exception:                                    # noqa: BLE001
-        pass
-    broken = _broken_nvidia_note(comp)
-    if broken:
-        notices.append(S.Notice("warn", broken, ""))
-    if s.family and s.model:
-        if s.context is None:
-            s.context = catalog.max_context(s.family, s.model, hw)
-        from strata_control import gpu_fit as _gf
-        _q4 = _gf.strix_q4_stall_note(s.model, comp.gpus)       # REMOVE with the Strix stall fix (gpu_fit.STRIX_Q4_NOTE)
-        if _q4:
-            notices.append(S.Notice("warn", _q4, ""))
-        rows = [r for r in catalog.rows(hw, own=(s.family, s.model) if s.model_path else None) if r.family == s.family and r.model == s.model]
-        if rows:
-            r = rows[0]
-            if r.verdict == "disk":
-                other = catalog.disk_free(s.data_dir) if s.data_dir else None      # --data-dir names another drive: its free space decides
-                if other is not None and other >= r.disk_need_gb:
-                    r = r.without_disk()
-            if r.verdict == "no":
-                notices.append(S.Notice("warn", f"{r.title} does not fit this computer.", "It can still start; expect it to be slow or to run out of memory."))
-            elif r.verdict == "slower":
-                notices.append(S.Notice("warn", f"{r.title}: {r.words}.", ""))
-            elif r.verdict == "disk":
-                notices.append(S.Notice("warn", f"{r.title}: {r.sentence}.", "It can still start, but the download is likely to stop; free some space first."))
-            elif r.verdict == "tight" and s.model_path and "disk space" in r.words:
-                pass                                         # the files are already here ("used where they are"): there is no download to make room for
-            elif r.verdict == "tight":
-                words = r.words[len("tight:"):].strip() if r.words.startswith("tight:") else r.words
-                notices.append(S.Notice("warn", f"{r.title} is a tight fit: {words}.", "Close other programs before you start."))
-            if s.vision not in (None, "off") and not r.images:
-                notices.append(S.Notice("warn", f"{r.title} cannot read pictures yet, so pictures are off.", ""))
-                s.vision = "off"
-            if s.vision is None:                             # nobody chose: on when the model and the engine can, silently off otherwise
-                s.vision = ("on" if r.images else "off") if s.family == "hy4-flash" else catalog.picture_default(r.images)
-                if s.vision == "off" and r.images and s.family != "hy4-flash" and catalog.reader_state() == "missing":
-                    notices.append(S.Notice("warn", "The engine installed here has no picture reader, so pictures are off.",
-                                            "Update the engine to read pictures, or add --vision off to silence this."))
-        notices += S.check_context(s, max_fit_tokens=None)
+    issue = ryzen_policy.launch_problem(s) or ryzen_policy.hardware_problem(hw, (s.gpus or [None])[0])
+    if issue:
+        return s, [S.Notice("error", issue, "")]
+    if note := ryzen_policy.vram_note(comp.gpus):
+        notices.append(S.Notice("warn", note, ""))
+    ryzen_policy.set_launch_defaults(s)
     if s.access != "local" and not s.api_key and not s.no_key:
         from strata_cli.launch import access
         kept = access.kept_key(s.name or f"{s.model or 'model'} {S.context_label(s.context)}")
@@ -814,27 +748,8 @@ def run_launch(a: argparse.Namespace) -> int:
                     return fail(f"No model set up by setup.py matches '{a.model}' and has an API key, and no launch is running.", 5)
             return fail("There is no API key for that launch." + ("" if a.preset else " Name a preset with --preset NAME, or a model set up by setup.py with --model NAME."), 5)
 
-        backend_note = None
-        if getattr(a, "backend", None):
-            from strata_control import engine_component as _ec
-            word = str(a.backend).strip().lower()
-            if word in ("auto", "default", "none"):
-                if not a.plan:
-                    _ec.save_backend(None)
-                os.environ.pop(_ec.ENV_BACKEND, None)
-                backend_note = "The engine make is chosen by the PC again (NVIDIA first, then AMD, then Intel)." if not a.plan else None
-            else:
-                family = _ec.clean_backend_name(word)
-                if not family:
-                    return fail(f"'{a.backend}' is not a make of graphics card Strata knows. Use nvidia, amd, intel or auto.", 2)
-                os.environ[_ec.ENV_BACKEND] = family          # this launch and everything it starts
-                made = _ec.MAKE_NAMES[family]
-                if a.plan:
-                    backend_note = f"With --backend {word} the engine for {made} cards is used. Nothing is remembered by --plan."
-                else:
-                    _ec.save_backend(family)
-                    backend_note = (f"The engine for {made} cards is used, now and next time. "
-                                    "`strata launch --backend auto` goes back to the PC's own choice.")
+        if getattr(a, "backend", None) not in (None, "auto", "hip", "amd"):
+            return fail(ryzen_policy.GPU_ERROR)
         try:
             catalog = Catalog()
         except CatalogUnavailable as e:
@@ -842,8 +757,6 @@ def run_launch(a: argparse.Namespace) -> int:
             if a.model or a.model_path:
                 return fail(str(e), 5)
         s, notices = settings_from_args(a, catalog)
-        if backend_note:
-            notices.append(S.Notice("warn", backend_note, ""))
         if not machine:
             _interrupted_move_notice()
         have_choices = bool(a.preset or a.model or a.model_path or a.context or a.vision or a.parallel or a.access or a.tune or a.drafting or a.draft_vocab or
@@ -856,7 +769,7 @@ def run_launch(a: argparse.Namespace) -> int:
             interactive = False
             _say(f"The screens need a Python package this install does not have yet ({no_screens_package}), so Strata goes on in plain lines. "
                  "Run setup again (START-HERE / ./setup.sh) to get the screens.")
-        if not have_choices and not interactive and not a.plan:
+        if not have_choices and not interactive and not a.plan and not a.yes:
             if machine or a.no_tui or catalog is None or not _can_ask():     # --no-tui never asks (round 8, M)
                 return fail("`strata launch` with no choices opens screens, and this is not a terminal (or --no-tui was given). Name what to start: --preset NAME, or --model NAME "
                             "(strata launch --help has examples; --plan shows what would happen without changing anything).", 2)
@@ -895,7 +808,6 @@ def run_launch(a: argparse.Namespace) -> int:
         move_data = _move_data_choice(a, s, catalog, machine)
         runner.s, runner.move_data = s, move_data
         if a.plan:
-            runner.look_up_feed = True                       # the plan asks the signed feed whether the small tuned drafter is listed (it lists the size the launch fetches)
             plan = runner.plan()
             plan["warnings"] = [n.line() for n in notes]
             if machine:

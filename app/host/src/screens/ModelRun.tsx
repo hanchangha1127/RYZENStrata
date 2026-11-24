@@ -41,9 +41,9 @@ export function ModelRunScreen() {
     // Before the engine's answer arrives the page would show the bundled Starter and then jump to the installed model (#3740): show a neutral placeholder instead.
     if (!native && !settled)
         return <div className="main__body"><div className="wrap stack" role="status" aria-label={tr("Loading…")}><div className="skel" style={{ height: 20, width: '60%' }}/><div className="skel" style={{ height: 20, width: '80%' }}/><div className="skel" style={{ height: 20, width: '70%' }}/></div></div>;
-    if (native && other)
+    if (native && other && !native.ryzenEdition)
         return <NativeLocalModel onBack={() => { setOther(false); setImportFirst(false); }}/>;
-    if (native && !other)
+    if (native)
         return <NativeModels onOtherModels={() => setOther(true)} onImport={() => { setImportFirst(true); setOther(true); }}/>;
     return <><LegacyModelRunScreen importFirst={importFirst} initialVariant={location.query.get('variant') ?? undefined}/>{tr(other ? <button className="st-btn native-return" onClick={() => setOther(false)}>{tr("Back")}</button> : null)}</>;
 }

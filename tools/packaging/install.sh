@@ -1,12 +1,12 @@
 #!/bin/sh
-# Strata Terminal: one-line installer for Linux (x86_64, and ARM64 on the NVIDIA DGX Spark) and macOS (Apple silicon).
+# RYZENStrata Terminal installer for native Linux x86-64.
 #
-#     curl -fsSL --connect-timeout 15 --max-time 120 https://github.com/Niko1221/Strata/releases/latest/download/install.sh -o install.sh && sh install.sh
+#     curl -fsSL --connect-timeout 15 --max-time 120 https://github.com/hanchangha1127/RYZENStrata/releases/latest/download/install.sh -o install.sh && sh install.sh
 #
 # What it does, in order (and nothing else):
 #   1. finds out which computer this is (system, processor, graphics card) so it can fetch the right archive;
 #   2. downloads the Terminal archive named in the release folder's install-manifest.txt and checks its SHA-256 against it;
-#   3. unpacks it into  ${XDG_DATA_HOME:-~/.local/share}/strata/terminal/<version>  (no administrator rights, nothing outside your home);
+#   3. unpacks it into  ${XDG_DATA_HOME:-~/.local/share}/ryzenstrata/terminal/<version>  (no administrator rights, nothing outside your home);
 #   4. checks the release's signed feed with the Terminal it just unpacked (`strata update --check`); if that check fails, it removes
 #      what it unpacked and stops;
 #   5. puts a `strata` link in ~/.local/bin and prints:  Installed. Run: strata launch
@@ -14,16 +14,16 @@
 # The engine (the part that talks to your graphics card) and the model are NOT part of this: `strata launch` fetches the engine for
 # your card the first time you choose a model, from the same release folder, signed.
 #
-# <feed> is where the release folder is hosted: GitHub Releases of Niko1221/Strata (the "latest" release's files), built in as the default.
+# <feed> is where the release folder is hosted: GitHub Releases of hanchangha1127/RYZENStrata (the "latest" release's files), built in as the default.
 # Set STRATA_FEED to another folder (a URL) to use that instead, for example a local test feed:  STRATA_FEED=http://127.0.0.1:8099 sh install.sh
 #
-# Settings (all optional): STRATA_FEED, STRATA_DATA_DIR (default ~/.local/share/strata), STRATA_BIN_DIR (default ~/.local/bin),
+# Settings (all optional): STRATA_FEED, STRATA_DATA_DIR (default ~/.local/share/ryzenstrata), STRATA_BIN_DIR (default ~/.local/bin),
 # STRATA_INSTALL_TEST_TRUST=1 (a test feed: also fetch <feed>/test-trust.json and trust only that key for the check in step 4).
 set -eu
 
-FEED="${STRATA_FEED:-https://github.com/Niko1221/Strata/releases/latest/download}"
+FEED="${STRATA_FEED:-https://github.com/hanchangha1127/RYZENStrata/releases/latest/download}"
 FEED="${FEED%/}"
-DATA_DIR="${STRATA_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/strata}"
+DATA_DIR="${STRATA_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/ryzenstrata}"
 BIN_DIR="${STRATA_BIN_DIR:-$HOME/.local/bin}"
 
 say() { printf '%s\n' "$*"; }
@@ -60,11 +60,11 @@ main() {
   os=$(uname -s); arch=$(uname -m)
   case "$os-$arch" in
     Linux-x86_64|Linux-amd64) platform=linux-x86_64 ;;
-    Darwin-arm64|Darwin-aarch64) platform=macos-arm64 ;;
-    Linux-aarch64|Linux-arm64) platform=linux-aarch64 ;;      # the NVIDIA DGX Spark (GB10); the note below says so for any other ARM computer
-    Darwin-x86_64) die "this Mac has an Intel processor. Strata for Mac needs Apple silicon (M1 or newer), so it could not run a model here." ;;
-    *) die "this computer ($os $arch) has no Strata Terminal. Supported: Linux x86_64 with an NVIDIA or AMD card, Linux ARM64 on an NVIDIA DGX Spark, macOS on Apple silicon (Windows: use install.ps1)." ;;
+    *) die "RYZENStrata requires native x86-64 Linux (Windows: use install.ps1)." ;;
   esac
+  if grep -qi microsoft /proc/sys/kernel/osrelease; then
+    die "WSL is unsupported. Use the Windows installer."
+  fi
   # The cards, for the person to read (nothing here decides which engine is used). Every card is named, with its count when several are the
   # same ("2 x NVIDIA RTX A4000"); a name carries its maker once ("NVIDIA RTX A4000", not "NVIDIA NVIDIA RTX A4000").
   # <cards>

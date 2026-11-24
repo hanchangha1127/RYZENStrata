@@ -346,6 +346,7 @@ from strata_control import speed_switches  # noqa: E402
 from strata_control import vision_reader  # noqa: E402
 from strata_control import draft_layer  # noqa: E402
 from strata_control import drafting  # noqa: E402
+from strata_control import ryzen_policy  # noqa: E402
 from strata_control import vram_fit  # noqa: E402
 from strata_control import user_args  # noqa: E402
 from strata_control import gpu_roles  # noqa: E402
@@ -3668,6 +3669,19 @@ def engine_args(cfg: dict, exe: str | None = None, *, announce: bool = True) -> 
     layer_split_value). `exe` is the engine program that will start: the drafter's flags follow what that program takes
     (strata_control/drafting.py engine_form). `announce=False` builds the arguments without the "[strata] drafting" lines
     and without leaving a note for the next engine start (the retry arguments of mtp_retry_args)."""
+    if cfg.get("ryzen_profile"):
+        args = list(cfg["args"])
+        if cfg.get("drafting") == ryzen_policy.DRAFTER:
+            data = drafting.data_dir_of(args)
+            vocab = drafting.vocab_path(args, data)
+            if data is None or vocab is None or not drafting.stock_q4_ok(data):
+                raise ValueError("The verified DFlash2 Q4_0 pack or vocabulary is missing. Run setup again or choose drafting off.")
+            flags = list(drafting.engine_flags(drafting.target_path(data), vocab))
+            flags[flags.index("--spec") + 1] = "4"
+            args = drafting.strip_draft_flags(args) + flags
+            if announce:
+                print("[strata] Drafting: DFlash2 Q4_0", flush=True)
+        return args
     if hy4_kind.is_hy4(cfg):                     # the Hy4-Flash engine takes none of the Flash-Next flags below (serve/hy4_kind.py)
         return hy4_kind.engine_args(cfg, exe, announce=announce)
     if inkling_kind.is_inkling(cfg):             # the Inkling-2-Mini engine takes its own flags (serve/inkling_kind.py)
@@ -4026,6 +4040,14 @@ def child_env(cfg: dict, *, offline: bool = False) -> dict:
         env["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in ordered_gpus(cfg))
     for k, v in (cfg.get("env") or {}).items():      # engine settings the config carries (AMD: the GEMM tuning table)
         env[str(k)] = str(v)
+    if cfg.get("ryzen_profile"):
+        cards = hip_visible(cfg)
+        if cards:
+            env["HIP_VISIBLE_DEVICES"] = ",".join(str(i) for i in cards)
+        env["STRATA_PREFILL_CPU_SHARE"] = "0"
+        env["STRATA_SPLIT_CPU_SHARE"] = "0"
+        env["STRATA_PREFILL_CPU_SHARE_BATCH"] = "0"
+        env.pop("STRATA_TEST_CONC_ON_HOST_CPU", None)
     # #6497: honor an explicit CPU thread cap (`--pool-workers N` or `threads`) in OpenMP/BLAS runtimes too unless
     # the user already set OMP_NUM_THREADS explicitly.
     pw = _configured_pool_workers(cfg)
@@ -8184,6 +8206,8 @@ def make_handler(svc: Service):
 
         def _openai(self, req):
             req = svc.with_shared(req, "openai")
+            if getattr(svc, "ryzen_profile", False) and top_logprobs(req) is not None:
+                raise ValueError("logprobs are unavailable in the GPU-only Ryzen edition")
             bias_api.normalize(req.get("logit_bias"), len(getattr(svc.tok, "tokens", ())) or None)
             messages, tools, kw = openai_to_messages(req)
             require_messages(messages)                # an empty conversation is a 400, as OpenAI answers it, not a reply to nothing
@@ -8790,6 +8814,9 @@ def start_engine_or_fallback(cfg: dict, exe: str, effort_end: list[str] | None, 
     """Start the run config's engine. A config written for the all-cards split engine (strata_control/split_engine.py) carries the
     normal layer-split config under "split_fallback": if that engine refuses or fails to come up, say so in one plain line and start the
     normal one instead, so a start never fails because of the option. Any other config starts exactly as before."""
+    if cfg.get("ryzen_profile"):
+        return StrataEngine(exe, engine_args(cfg, exe) + (effort_end or []), cwd=cfg.get("cwd"),
+                            log=cfg.get("log"), env=env, lazy=lazy)
     fb = cfg.get("split_fallback")
     try:
         return StrataEngine(exe, engine_args(cfg, exe) + (effort_end or []), cwd=cfg.get("cwd"), log=cfg.get("log"), env=env, lazy=lazy,
@@ -9271,8 +9298,6 @@ def _main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> i
     if _ds:                                             # DeepSeek: this Strata no longer runs it; stop before the engine starts (retired.py)
         print(retired.server_line(_ds), flush=True)
         return 2
-    if a.config and a.engine == "strata" and not hy4_kind.is_hy4(cfg) and not inkling_kind.is_inkling(cfg):     # (custom shape engines have no Flash-Next tuning knobs)
-        cfg = apply_saved_tuning(cfg)
     attestation_key = os.environ.pop("STRATA_OWNER_ATTEST_KEY", None)
     launch_attestation = None
     if a.owner_fd is not None:
@@ -9321,6 +9346,10 @@ def _main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> i
                               "prefill_gpu": int(pair[0]), "decode_gpu": int(pair[1])}
     if a.gpu is not None:
         cfg["gpu"] = int(a.gpu) if a.gpu.strip().isdigit() else a.gpu
+    if a.engine == "strata":
+        issue = ryzen_policy.runtime_problem(cfg) or ryzen_policy.host_hardware_problem(cfg.get("gpu"))
+        if issue:
+            ap.error(issue)
     a.host = a.host or cfg.get("host") or "127.0.0.1"   # issue #26: the run scripts pass no --host, the config can
     supplied_args = argv if argv is not None else sys.argv[1:]
     if ("STRATA_API_KEY" in os.environ and not os.environ["STRATA_API_KEY"].strip()) or \
@@ -9448,6 +9477,8 @@ def _main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> i
             exe = _component_exe(cfg["exe"], cfg)
         else:
             exe = cfg["exe"] if os.path.isabs(cfg["exe"]) else os.path.abspath(os.path.join(cfg.get("cwd") or ".", cfg["exe"]))
+        if not ryzen_policy.engine_has_profile(Path(exe), env=env):
+            ap.error(ryzen_policy.ENGINE_ERROR)
         try:
             silence = engine_silence_s(cfg)             # #481: checked before the (minutes-long) start
             apply_ready_timeout(cfg)
@@ -9494,6 +9525,7 @@ def _main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> i
                   sampling_defaults=sampling_defaults,
                   fit_max_tokens=a.fit_max_tokens or (not a.no_fit_max_tokens and cfg.get("fit_max_tokens") is not False))
     svc.launch_attestation = launch_attestation
+    svc.ryzen_profile = cfg.get("ryzen_profile") is True
     svc.offline = a.offline
     svc.max_queue = max_queue
     svc.queue_timeout_s = float(queue_timeout) if queue_timeout is not None else None

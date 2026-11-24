@@ -1,21 +1,21 @@
-# Strata Terminal: one-line installer for Windows (PowerShell 5.1 or newer).
+# RYZENStrata Terminal installer for Windows x64 (PowerShell 5.1 or newer).
 #
-#     irm -TimeoutSec 120 https://github.com/Niko1221/Strata/releases/latest/download/install.ps1 | iex
+#     irm -TimeoutSec 120 https://github.com/hanchangha1127/RYZENStrata/releases/latest/download/install.ps1 | iex
 #
 # What it does, in order (and nothing else):
 #   1. finds out which computer this is (Windows, processor, graphics card);
 #   2. downloads the Terminal archive named in the release folder's install-manifest.txt and checks its SHA-256 against it;
-#   3. unpacks it into  %LOCALAPPDATA%\Strata\terminal\<version>  (no administrator rights);
+#   3. unpacks it into  %LOCALAPPDATA%\RYZENStrata\terminal\<version>  (no administrator rights);
 #   4. checks the release's signed feed with the Terminal it just unpacked (`strata update --check`); if that fails it removes what it
 #      unpacked and stops;
-#   5. adds  %LOCALAPPDATA%\Strata\terminal\current\bin  to your user PATH and prints:  Installed. Run: strata launch
+#   5. adds  %LOCALAPPDATA%\RYZENStrata\terminal\current\bin  to your user PATH and prints:  Installed. Run: strata launch
 #
 # The engine and the model are not part of this: `strata launch` fetches the engine for your graphics card the first time you choose
 # a model, from the same release folder, signed.
 #
-# <feed> is where the release folder is hosted: GitHub Releases of Niko1221/Strata (the "latest" release's files), built in as the default.
+# <feed> is where the release folder is hosted: GitHub Releases of hanchangha1127/RYZENStrata (the "latest" release's files), built in as the default.
 # Set $env:STRATA_FEED to another folder (a URL) to use that instead, for example a local test feed:  $env:STRATA_FEED='http://127.0.0.1:8099'; irm http://127.0.0.1:8099/install.ps1 | iex
-# Optional: $env:STRATA_DATA_DIR (default %LOCALAPPDATA%\Strata), $env:STRATA_INSTALL_TEST_TRUST='1' (a test feed: trust only its
+# Optional: $env:STRATA_DATA_DIR (default %LOCALAPPDATA%\RYZENStrata), $env:STRATA_INSTALL_TEST_TRUST='1' (a test feed: trust only its
 # test-trust.json for step 4), $env:STRATA_NO_PATH='1' (do not change the user PATH).
 & {   # a child scope: `irm | iex` runs in the caller's scope, and this script's variables must not overwrite the caller's
 $ErrorActionPreference = 'Stop'
@@ -26,7 +26,7 @@ function Die([string]$msg) { [Console]::Error.WriteLine("strata installer: $msg"
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch { }
 try { if ([Net.WebRequest]::DefaultWebProxy) { [Net.WebRequest]::DefaultWebProxy.Credentials = [Net.CredentialCache]::DefaultNetworkCredentials } } catch { }
 
-$feed = if ($env:STRATA_FEED) { $env:STRATA_FEED } else { 'https://github.com/Niko1221/Strata/releases/latest/download' }
+$feed = if ($env:STRATA_FEED) { $env:STRATA_FEED } else { 'https://github.com/hanchangha1127/RYZENStrata/releases/latest/download' }
 $feed = $feed.TrimEnd('/')
 $feedHost = try { ([Uri]$feed).Host } catch { '' }
 if (-not $feedHost) { $feedHost = $feed }
@@ -100,9 +100,9 @@ function Add-ToUserPath([string]$dir, [string]$sub = 'Environment') {
 if (-not $feed) {
     Die 'this installer does not know where the Strata release folder is. Set $env:STRATA_FEED to its address and run it again, for example: $env:STRATA_FEED=''https://example.org/strata'''
 }
-if ([Environment]::OSVersion.Platform -ne 'Win32NT') { Die 'this is the Windows installer; on Linux or macOS use install.sh.' }
+if ([Environment]::OSVersion.Platform -ne 'Win32NT') { Die 'this is the Windows installer; on native Linux x86-64 use install.sh.' }
 $arch = $env:PROCESSOR_ARCHITEW6432; if (-not $arch) { $arch = $env:PROCESSOR_ARCHITECTURE }
-if ($arch -ne 'AMD64') { Die "this computer ($arch) is a Windows on ARM PC. Strata needs an NVIDIA or AMD graphics card and has no engine for ARM processors, so it could not run a model here. Run this installer on a Windows PC with an Intel or AMD processor (x64) and one of those cards." }
+if ($arch -ne 'AMD64') { Die "this computer ($arch) is unsupported. Use Windows x64 on a Ryzen AI Max+ 395 or 495." }
 $platform = 'windows-x86_64'
 $gpu = ''
 # a discrete card is named before a built-in one (a Ryzen's "AMD Radeon(TM) Graphics" is listed first on many PCs); this line is only for the person to read
@@ -112,7 +112,7 @@ Write-Host "  This computer: Windows $arch ($platform)$(if ($gpu) { ", graphics:
 Write-Host "  Release folder: $feed"
 
 if (-not $env:STRATA_DATA_DIR -and -not $env:LOCALAPPDATA) { Die 'Windows did not say where your user folder is. Set $env:STRATA_DATA_DIR to a folder you own, for example $env:STRATA_DATA_DIR=''C:\Strata'', and run this again.' }
-$data = if ($env:STRATA_DATA_DIR) { $env:STRATA_DATA_DIR } else { Join-Path $env:LOCALAPPDATA 'Strata' }
+$data = if ($env:STRATA_DATA_DIR) { $env:STRATA_DATA_DIR } else { Join-Path $env:LOCALAPPDATA 'RYZENStrata' }
 $work = Join-Path ([IO.Path]::GetTempPath()) ("strata-install-" + [Guid]::NewGuid().ToString('N').Substring(0, 8))
 New-Item -ItemType Directory -Path $work | Out-Null
 try {

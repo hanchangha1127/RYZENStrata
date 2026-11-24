@@ -215,3 +215,32 @@ test('picture readiness: Qwen needs strata-vision in the engine folder',()=>{
  assert.deepEqual(withReader.map(f=>f.sizes[0].images),[true,false]);
  assert.equal(markPictures(null,true),null);
 });
+
+test('Ryzen plans use HIP, Q2_0, a 256K int8 KV cache, and DFlash2 by default', async()=>{
+ const f=nativeFixture();
+ try{
+  f.catalog.edition='ryzen';
+  f.catalog.ryzen_hardware={supported:true,warning:'48 GiB of GPU memory is recommended.'};
+  await f.control.refresh();
+  assert.equal(f.control.state().ryzenEdition,true);
+  assert.equal(f.control.state().ryzenHardware.supported,true);
+  assert.deepEqual(f.control.state().installed.models,[]);
+  await f.control.plan({vision:'no'});
+  const args=f.rpcCalls.find(c=>c.name==='strata_install').arguments;
+  assert.equal(args.family,'qwen');
+  assert.equal(args.model,'Q2_0');
+  assert.equal(args.backend,'hip');
+  assert.equal(args.context,262144);
+  assert.equal(args.kv,'int8');
+  assert.equal(args.vision,'no');
+  assert.equal(args.drafter,'dflash2');
+  await assert.rejects(f.control.plan({model:'IQ3_S'}),/only the ISTA-DASLab/);
+  await assert.rejects(f.control.plan({backend:'cpu'}),/integrated Radeon GPU/);
+  await assert.rejects(f.control.plan({vision:'cpu'}),/serves text only/);
+  await assert.rejects(f.control.plan({drafting:'mtp'}),/Choose DFlash2/);
+  assert.throws(()=>f.control.operation('update-strata'),/HIP engine package/);
+  f.catalog.ryzen_hardware={supported:false,error:'Ryzen test hardware is unsupported.'};
+  await f.control.refresh(true);
+  await assert.rejects(f.control.plan({}),/Ryzen test hardware is unsupported/);
+ }finally{await f.cleanup();}
+});

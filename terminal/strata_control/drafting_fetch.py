@@ -374,17 +374,17 @@ def ensure_for(data_dir: str | Path, *, model_name: str | None, backend: str | N
 
 
 def ensure(data_dir: str | Path, *, progress: Progress | None = None, cancel: threading.Event | None = None,
-           base_url: str | None = None, files=None) -> Path:
+           base_url: str | None = None, files=None, stock_q4_only: bool = False) -> Path:
     """Make the packed drafter exist under ``data_dir`` and return its path. A pack that is there is kept. Resumable: an interrupted
     download is continued, a file whose hash differs is deleted and the person is told. ``base_url`` / ``files`` are for tests."""
     report = progress or (lambda *_: None)
     out = drafting.target_path(data_dir)
-    if drafting.pack_ready(data_dir):
+    if drafting.stock_q4_ok(data_dir) if stock_q4_only else drafting.pack_ready(data_dir):
         drafting.provide_vocab(data_dir)
-        if files is None and drafting.engine_has_selector_q4():
+        if files is None and not stock_q4_only and drafting.engine_has_selector_q4():
             convert_selector(data_dir, progress=report)
         report("The DFlash2 drafter is ready.", 1, 1)
-        return drafting.pack_path(data_dir)
+        return out if stock_q4_only else drafting.pack_path(data_dir)
     acquisition.require("the DFlash2 drafter", "strata drafting fetch")
     folder = out.parent
     src = folder / "src"
@@ -437,7 +437,7 @@ def ensure(data_dir: str | Path, *, progress: Progress | None = None, cancel: th
     except OSError:
         pass
     drafting.provide_vocab(data_dir)                 # the draft vocabulary comes with the pack: an install that never had the MTP layer needs it
-    if files is None and drafting.engine_has_selector_q4():
+    if files is None and not stock_q4_only and drafting.engine_has_selector_q4():
         convert_selector(data_dir, progress=report)  # the smaller selector (174 MiB), made here from the pack just checked; the bf16-selector pack stays beside it
     report("The DFlash2 drafter is ready.", total, total)
     return out

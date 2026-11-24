@@ -29,15 +29,20 @@
 namespace strata::kernels::cpu {
 namespace {
 
-std::atomic<bool> oracle_q8_0{false};
-
 [[noreturn]] void unsupported(const char* what) {
+#if defined(STRATA_RYZEN_PROFILE)
+    std::fprintf(stderr, "RYZENStrata does not run %s on the CPU\n", what);
+#else
     std::fprintf(stderr,
                  "strata: %s is x86-only (AVX2/AVX-512) and this build has no portable version.\n"
                  "        On this CPU use a native GGUF pack (IQ2_XS, IQ3_S, IQ4_NL, Q4_K, ...).\n",
                  what);
+#endif
     std::abort();
 }
+
+#if !defined(STRATA_RYZEN_PROFILE)
+std::atomic<bool> oracle_q8_0{false};
 
 inline float bf16f(uint16_t h) {
     const uint32_t b = (uint32_t) h << 16;
@@ -45,6 +50,7 @@ inline float bf16f(uint16_t h) {
     std::memcpy(&f, &b, 4);
     return f;
 }
+#endif
 
 }  // namespace
 
@@ -52,6 +58,9 @@ inline float bf16f(uint16_t h) {
 
 
 
+#if defined(STRATA_RYZEN_PROFILE)
+void act_quant_q8_1(const float*, int, ActQ&) { unsupported("expert activation quantization"); }
+#else
 void act_quant_q8_1(const float* x, int n, ActQ& a) {
     // The Q8_0 oracle contract (expert.cpp's quantize_oracle_q8_0) is an AVX rounding.  The legacy scalar loop
     // below is what the engine uses; the oracle flag would silently quantize differently here.
@@ -79,6 +88,7 @@ void act_quant_q8_1(const float* x, int n, ActQ& a) {
         a.hx[k] = s * (float) sum;
     }
 }
+#endif
 
 void act_quant_q8_1_avx2(const float* x, int n, ActQ& a) { act_quant_q8_1(x, n, a); }
 
@@ -177,6 +187,9 @@ void bf16_rows_dot(const uint16_t* w, int rows, int cols, const float* x, float*
     bf16_rows_dot_multi(w, rows, cols, x, 1, out);
 }
 
+#if defined(STRATA_RYZEN_PROFILE)
+void bf16_rows_dot_multi(const uint16_t*, int, int, const float*, int, float*) { unsupported("router lookahead"); }
+#else
 void bf16_rows_dot_multi(const uint16_t* w, int rows, int cols, const float* x, int nt, float* out) {
     for (int r = 0; r < rows; ++r) {
         const uint16_t* wr = w + (size_t) r * (size_t) cols;
@@ -200,6 +213,7 @@ void bf16_rows_dot_multi(const uint16_t* w, int rows, int cols, const float* x, 
         }
     }
 }
+#endif
 
 
 // aarch64 has none of the x86 kernels: these names are referenced by shared code but reached only behind

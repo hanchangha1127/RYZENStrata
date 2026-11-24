@@ -800,6 +800,9 @@ void ExpertPool::diag(std::FILE* f) const {
     std::fprintf(f, " for %lld ms\n", (long long) (now_ms() - hstate_ms_.load()));
 }
 
+#if defined(STRATA_RYZEN_PROFILE)
+ExpertPool::ExpertPool(int, bool, bool, PoolAffinity, int) : host_works_(false) {}
+#else
 ExpertPool::ExpertPool(int n_workers, bool pin, bool host_works, PoolAffinity affinity, int tasks)
     : tasks_(tasks), host_works_(host_works), affinity_(affinity), topo_(detect_cpu_topology(true, affinity)) {
     if (tasks < 0 || tasks > kMaxTasks) throw std::invalid_argument("expert pool tasks must be in 0..4096");
@@ -1002,6 +1005,7 @@ ExpertPool::ExpertPool(int n_workers, bool pin, bool host_works, PoolAffinity af
         });
     }
 }
+#endif
 
 std::string ExpertPool::placement_line() const {
     if (n_ <= 0) return "";

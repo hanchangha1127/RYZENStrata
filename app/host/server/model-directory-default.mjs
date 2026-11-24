@@ -8,7 +8,7 @@ import { utf8Script } from './powershell-utf8.mjs';
 export function defaultModelDirectory({platform=process.platform,home=homedir(),env=process.env,read=readFileSync,windowsDocuments=()=>execFileSync('powershell.exe',['-NoProfile','-NonInteractive','-Command',utf8Script("[Environment]::GetFolderPath('MyDocuments')")],{encoding:'utf8',timeout:5000,windowsHide:true}).trim()}={}) {
  const path=platform==='win32'?win32:posix;
  if(env.STRATA_MODELS_DIR)return path.resolve(env.STRATA_MODELS_DIR);
- return path.join(documentsFolder({platform,home,env,read,windowsDocuments}),'Strata','Models');
+ return path.join(documentsFolder({platform,home,env,read,windowsDocuments}), env.STRATA_RYZEN_EDITION === '1' ? 'RYZENStrata' : 'Strata', 'Models');
 }
 
 /** The user's Documents folder as this system names it (Linux: XDG_DOCUMENTS_DIR, so "Dokumente" on a German desktop), else <home>/Documents. */

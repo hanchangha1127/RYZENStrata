@@ -5,11 +5,12 @@
     {
       "name": "cpu-check",
       "displayName": "CPU check build (no GPU, no network)",
-      "description": "The fast check: the CPU-only engine pieces and every test that needs no GPU and no model, the conversation cache and park pool tests included. STRATA_NATIVE_EXPERTS=OFF, so ggml is not needed. tools/check runs this preset.",
+      "description": "Host-side tests that need no GPU or model. STRATA_NATIVE_EXPERTS=OFF, so ggml is not needed.",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/${presetName}",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
+        "RYZENSTRATA_TEST_ONLY": "ON",
         "STRATA_BUILD_TESTS": "ON",
         "STRATA_BUILD_CONVERSATION_TESTS": "ON",
         "STRATA_NATIVE_EXPERTS": "OFF"
@@ -23,26 +24,9 @@
       "cacheVariables": { "STRATA_NATIVE_EXPERTS": "ON" }
     },
     {
-      "name": "cuda-compile",
-      "displayName": "CUDA compile-only (the release flags of packaging/build_cuda_linux.sh, no tests)",
-      "description": "Builds the strata target for the given CUDA architectures. No GPU is needed to compile; nothing is run. ggml is the vendored third_party/strata-ggml; -DSTRATA_GGML_DIR=<llama.cpp checkout> overrides it.",
-      "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build/${presetName}",
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Release",
-        "STRATA_ENABLE_CUDA": "ON",
-        "STRATA_BUILD_TESTS": "OFF",
-        "STRATA_NATIVE_EXPERTS": "ON",
-        "STRATA_PORTABLE": "ON",
-        "STRATA_Q6K_EXPERTS": "ON",
-        "STRATA_EXPERIMENTAL_SM60": "OFF",
-        "CMAKE_CUDA_ARCHITECTURES": "86-real;89-real;89-virtual"
-      }
-    },
-    {
       "name": "hip-compile",
-      "displayName": "HIP compile-only (the release flags of packaging/build_hip_linux.sh, no tests)",
-      "description": "Builds the strata target for gfx1100 and gfx1201 with ROCm's hipcc. ggml is the vendored third_party/strata-ggml (-DSTRATA_GGML_DIR=<llama.cpp checkout> overrides it); if hipcc is not on PATH pass -DCMAKE_HIP_COMPILER=<rocm>/llvm/bin/clang++.",
+      "displayName": "Build the gfx1151 HIP engine",
+      "description": "Builds the strata target for gfx1151 using ROCm. Pass -DCMAKE_HIP_COMPILER=<rocm>/llvm/bin/clang++ if needed.",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/${presetName}",
       "cacheVariables": {
@@ -51,14 +35,13 @@
         "STRATA_ENABLE_CUDA": "OFF",
         "STRATA_BUILD_TESTS": "OFF",
         "STRATA_PORTABLE": "ON",
-        "CMAKE_HIP_ARCHITECTURES": "gfx1100;gfx1201"
+        "CMAKE_HIP_ARCHITECTURES": "gfx1151"
       }
     }
   ],
   "buildPresets": [
     { "name": "cpu-check", "configurePreset": "cpu-check", "jobs": 0 },
     { "name": "cpu-check-native", "configurePreset": "cpu-check-native", "jobs": 0 },
-    { "name": "cuda-compile", "configurePreset": "cuda-compile", "targets": ["strata"], "jobs": 0 },
     { "name": "hip-compile", "configurePreset": "hip-compile", "targets": ["strata"], "jobs": 0 }
   ],
   "testPresets": [

@@ -830,10 +830,17 @@ Verifier::~Verifier() {
     if (arena_) cudaFree(arena_);
     if (mk_counters_) cudaFree(mk_counters_);
     if (hcount_d_) cudaFree(hcount_d_);
-    void* hosts[] = {h_tok_, h_step_, h_pos_, h_commit_, h_ple_, h_out_, h_x_, h_ids_, h_w_, h_seq_, h_flag_, h_ymiss_,
+    void* hosts[] = {h_tok_, h_step_, h_pos_, h_commit_, h_ple_, h_expert_stage_, h_out_, h_x_, h_ids_, h_w_, h_seq_, h_flag_, h_ymiss_,
                      h_flagA_, h_plan_, h_flagB_, h_plan_err_, h_nf_, herr_h_, hdrop_h_, h_bal_, h_mk_stall_};
     for (void* h : hosts)
         if (h) cudaFreeHost(h);
+}
+
+bool Verifier::gather_ple_rows(strata::kernels::PleTable& table, const uint32_t* rows, size_t tokens,
+                              std::string& err) {
+    if (gpu_experts_only_)
+        return table.gather_raw_iq4nl(rows, tokens, reinterpret_cast<uint8_t*>(h_ple_), &err);
+    return table.gather_batch(rows, tokens, h_ple_, err);
 }
 
 int Verifier::tap_total() const {
@@ -1058,6 +1065,12 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
               mapped(64, (void**) &h_mk_stall_, (void**) &m_mk_stall_) &&
               mapped(T * K * N * 4, (void**) &h_ymiss_, (void**) &m_ymiss_);
     if (!ok) { err = "verify: mapped staging allocation failed " + strata::core::pin_exhausted_hint(); return false; }
+    if (gpu_experts_only_ &&
+        !mapped((size_t) staging_blobs() * strata::kernels::cpu::expert_layout().max_blob,
+                (void**) &h_expert_stage_, (void**) &m_expert_stage_)) {
+        err = "verify: GPU-only expert staging allocation failed " + strata::core::pin_exhausted_hint();
+        return false;
+    }
     if (h_mk_stall_ != nullptr) *h_mk_stall_ = 0u;
     if (g_megakernel() && mk_counters_ == nullptr) mk_counters_ = strata::kernels::mk_counters_alloc();
     // DFlash2 taps: set_taps (the drafter) or STRATA_TAP_FILE (the research dump); off, and nothing is allocated or captured, otherwise
@@ -1151,13 +1164,13 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
         bal_->on = true;
     }
     // the GPU plan: counts(4) | start(cap+1) | dst(cap) | tok(cap) | pad | ptr(cap u64) | ptr2(cap u64) | start2(cap+1)
-    // | pad | dst2(kStagingBlobs u64)
+    // | pad | dst2(staging_blobs() u64)
     {
         const int64_t cap = (int64_t) (T * K);
         const int64_t i32 = 4 + (cap + 1) + cap + cap;
         const int64_t ptr_off = (i32 + 1) & ~1ll;
         dst2_off_ = (ptr_off + 4 * cap + (cap + 1) + 1 + 1) & ~1ll;
-        plan_i32_ = dst2_off_ + 2 * kStagingBlobs;
+        plan_i32_ = dst2_off_ + 2 * staging_blobs();
         if (!mapped((size_t) plan_i32_ * 4 * 2 + 64, (void**) &h_plan_, (void**) &m_plan_)) {
             err = "verify: mapped plan allocation failed " + strata::core::pin_exhausted_hint();
             return false;
@@ -1212,7 +1225,7 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
         shared_ = b.take<float>(T * N); parts_ = b.take<float>(T * K * N); hit_out_ = b.take<float>(T * K * N);
         hit_slot_ = b.take<int32_t>(T * K); hit_dst_ = b.take<int32_t>(T * K); hit_count_ = b.take<int32_t>(4);
         plan_ = b.take<int32_t>(2 * ((uint64_t) plan_i32_ + 16));
-        staging_ = b.take<uint8_t>((uint64_t) kStagingBlobs * strata::kernels::cpu::expert_layout().max_blob);
+        staging_ = b.take<uint8_t>((uint64_t) staging_blobs() * strata::kernels::cpu::expert_layout().max_blob);
         hit_xq_ = b.take<uint8_t>(T * (N / 32) * 34); hit_xs_ = b.take<float>(T * (N / 32));
         nat_xq_ = b.take<uint8_t>(T * (N / 32) * 36);
         nat_xr_ = had_gu_any ? b.take<float>(T * N) : nullptr;
@@ -1290,7 +1303,7 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
         had_sh_ = strata::kernels::hadamard_device_signs(strata::kernels::cpu::hadamard_signs((int) g.n_ff), (int) g.n_ff);
     }
     sink_.staging = (unsigned long long) staging_;
-    sink_.staging_cap = kStagingBlobs;
+    sink_.staging_cap = staging_blobs();
     (void) TS;
     // STRATA_GRAPH_PRIO=1 (opt-in): the window's streams carry priorities that their captured kernel
     // nodes keep (the window graph is instantiated with cudaGraphInstantiateFlagUseNodePriority): the GDN gates / QSA
@@ -1418,11 +1431,11 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
         const char* v = std::getenv("STRATA_VERIFY_DEVICE_PLAN");
         if (v == nullptr) v = std::getenv("STRATA_VERIFY_DEVICE_HITS");
         // (not with set_always_publish: the device table may lag the host's while windows are in flight)
-        device_plan_ = !all_resident_ && !always_publish_ && (v != nullptr && std::atoi(v) != 0);
+        device_plan_ = !gpu_experts_only_ && !all_resident_ && !always_publish_ && (v != nullptr && std::atoi(v) != 0);
 #if defined(STRATA_GPU_METAL)
         device_hits_ = false;
 #else
-        device_hits_ = !all_resident_ && !always_publish_ && hits.d_res != nullptr && hits.cache_base != nullptr &&
+        device_hits_ = !gpu_experts_only_ && !all_resident_ && !always_publish_ && hits.d_res != nullptr && hits.cache_base != nullptr &&
                        device_hits_env_on(std::getenv("STRATA_VERIFY_DEVICE_HITS"));
 #endif
         if (device_hits_) device_plan_ = false;
@@ -1698,7 +1711,10 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
         if (l == 1 && ple_on) {
             if (grp == 0) {
                 if (ar_on()) wait_flag_ge(m_flag_, 1, cs);
-                copy_from_mapped(ple_, m_ple_, (int64_t) T * N, cs);
+                if (gpu_experts_only_)
+                    ple_iq4nl_dequant(reinterpret_cast<const uint8_t*>(m_ple_), (int64_t) T * PLE_N_HEADS, ple_, cs);
+                else
+                    copy_from_mapped(ple_, m_ple_, (int64_t) T * N, cs);
             }
             float* normalized = (float*) ((uint8_t*) ss.ple.scratch + ple_block_scratch_bytes());
             static const bool ple_batch_env = [] {
@@ -2883,7 +2899,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                 wait_flag_ge_stamped(m_flagB_, ring, m_bal_ + ((l - lb_) * 2 + grp) * 4 + 1, nullptr, cs);
             else wait_flag_ge(m_flagB_, ring, cs);                 // the PCIe share is in staging (DMA) or mapped
             if (sink_.pcie_mode == 2) {                            // stage it with a copy kernel, then point at staging
-                const int64_t per = G == 2 ? kStagingBlobs / 2 : kStagingBlobs;
+                const int64_t per = G == 2 ? staging_blobs() / 2 : staging_blobs();
                 uint8_t* stage = staging_ + (size_t) (grp * per) * lay.max_blob;
                 const unsigned long long* p_dst2 = (const unsigned long long*) (pl + dst2_off_);   // STRATA_ADAPT_FETCH
                 fetch_blobs(p_ptr2, p_counts + 2, stage, (int64_t) lay.blob_bytes(l), (int) per, cs, p_dst2);
@@ -3868,7 +3884,7 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
     if (!pre && ar_on() && !test_stall && (early_ple_flag_mode() == 1 || (early_ple_flag_mode() == 2 && !graph_launched))) {
         if (do_ple) {
             const Clock::time_point tp = Clock::now();
-            if (!ss.ple.table->gather_batch(ple_rows, (size_t) T, h_ple_, err)) return false;
+            if (!gather_ple_rows(*ss.ple.table, ple_rows, (size_t) T, err)) return false;
             std::atomic_thread_fence(std::memory_order_seq_cst);
             strata_store_fence();
             ms_host += ms_since(tp);
@@ -3981,7 +3997,7 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
             // up before the launch (early_ple_flag_mode)
         } else if (do_ple) {
             const Clock::time_point tp = Clock::now();
-            if (!ss.ple.table->gather_batch(ple_rows, (size_t) T, h_ple_, err)) return false;
+            if (!gather_ple_rows(*ss.ple.table, ple_rows, (size_t) T, err)) return false;
             std::atomic_thread_fence(std::memory_order_seq_cst);
             strata_store_fence();
             *flag = 1;
@@ -4110,7 +4126,7 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
         // MtpDrafter::draft and Layer 0's attention + router + expert execution!
         if (k == 0 && do_ple) {
             const Clock::time_point tp = Clock::now();
-            if (!ss.ple.table->gather_batch(ple_rows, (size_t) T, h_ple_, err)) return false;
+            if (!gather_ple_rows(*ss.ple.table, ple_rows, (size_t) T, err)) return false;
             std::atomic_thread_fence(std::memory_order_seq_cst);
             strata_store_fence();
             ms_host += ms_since(tp);
@@ -4350,8 +4366,11 @@ void Verifier::set_plan_slot(int grp) {
     sink_.start2 = base + ptr_off + 4 * cap;
     sink_.dst2 = (unsigned long long*) (base + dst2_off_);
     const int G = last_batch_ ? 1 : (groups_[last_t_] > 0 ? groups_[last_t_] : 1);
-    const int64_t per = G == 2 ? kStagingBlobs / 2 : kStagingBlobs;
-    sink_.staging = (unsigned long long) (staging_ + (size_t) (grp * per) * strata::kernels::cpu::expert_layout().max_blob);
+    const int64_t per = G == 2 ? staging_blobs() / 2 : staging_blobs();
+    const size_t staging_offset = (size_t) (grp * per) * strata::kernels::cpu::expert_layout().max_blob;
+    sink_.staging = (unsigned long long) (staging_ + staging_offset);
+    sink_.host_staging = h_expert_stage_ ? h_expert_stage_ + staging_offset : nullptr;
+    sink_.mapped_staging = m_expert_stage_ ? m_expert_stage_ + staging_offset : nullptr;
     sink_.device_hits_only = !last_batch_ && device_hits_active();
     sink_.staging_cap = per;
     const int tb = G == 2 && grp == 1 ? (last_t_ + 1) / 2 : 0;
@@ -5332,7 +5351,7 @@ bool Verifier::stage_batch(const int* rows, int S, int hbase, const int32_t* tok
             }
             ngram_rows(&tokens[t], prev, 1, ss_->ple.consts, ple_rows + t * PLE_N_HEADS);
         }
-        if (!ss_->ple.table->gather_batch(ple_rows, (size_t) S, h_ple_, err)) return false;
+        if (!gather_ple_rows(*ss_->ple.table, ple_rows, (size_t) S, err)) return false;
     }
     // Each slot owns a contiguous group. The default commit keeps all its rows; speculative
     // decoding may change the prefix length after comparing the draft with these picks.
@@ -6024,7 +6043,7 @@ int Verifier::service(PoolMultiFn pool, void* user, std::string& err) {
     auto gather_ple = [&]() -> bool {
         if (!fl_ple_) return true;
         const Clock::time_point tp = Clock::now();
-        if (!ss.ple.table->gather_batch(pl_ple_rows_.data(), (size_t) T, h_ple_, err)) return false;
+        if (!gather_ple_rows(*ss.ple.table, pl_ple_rows_.data(), (size_t) T, err)) return false;
         std::atomic_thread_fence(std::memory_order_seq_cst);
         strata_store_fence();
         ms_host += ms_since(tp);

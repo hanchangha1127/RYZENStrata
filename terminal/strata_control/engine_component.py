@@ -185,8 +185,8 @@ def components_dir(environ=None, *, windows: bool | None = None, home: Path | No
     windows = os.name == "nt" if windows is None else windows
     home = Path.home() if home is None else home
     if windows:
-        return Path(environ.get("LOCALAPPDATA") or str(home / "AppData" / "Local")) / "Strata" / "components"
-    return Path(environ.get("XDG_DATA_HOME") or str(home / ".local" / "share")) / "strata" / "components"
+        return Path(environ.get("LOCALAPPDATA") or str(home / "AppData" / "Local")) / "RYZENStrata" / "components"
+    return Path(environ.get("XDG_DATA_HOME") or str(home / ".local" / "share")) / "ryzenstrata" / "components"
 
 
 def engine_dir(root: Path | None = None) -> Path:
@@ -715,7 +715,7 @@ def gfx_from_name(name: str) -> str:
     text = re.sub(r"\s+", " ", str(name or "")).upper()
     if "AMD" not in text and "RADEON" not in text and "RYZEN" not in text:
         return ""
-    if re.search(r"\b(?:8060S|8050S)\b", text) or "RYZEN AI MAX" in text:
+    if re.search(r"\b(?:8060S|8065S|8050S)\b", text) or "RYZEN AI MAX" in text:
         return "gfx1151"
     if re.search(r"\bR9700\b|\bR97\d\d\b|\bAI PRO R97", text) or re.search(r"\bRX 9070\b", text):
         return "gfx1201"

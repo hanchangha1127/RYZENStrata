@@ -15,11 +15,12 @@ const winPath = (...parts) => parts.join('\\');
 
 /** The folder under which Strata keeps per-user state (tuning jobs, Time-skip runs). */
 export function stateRoot(env = process.env, platform = process.platform, home = homedir()) {
+  const ryzen = env.STRATA_RYZEN_EDITION === '1';
   if (platform === 'win32') {
     const local = env.LOCALAPPDATA || winPath(env.USERPROFILE || home, 'AppData', 'Local');
-    return winPath(local, 'Strata');
+    return winPath(local, ryzen ? 'RYZENStrata' : 'Strata');
   }
-  return posix.join(env.XDG_STATE_HOME || posix.join(env.HOME || '.', '.local', 'state'), 'strata');
+  return posix.join(env.XDG_STATE_HOME || posix.join(env.HOME || '.', '.local', 'state'), ryzen ? 'ryzenstrata' : 'strata');
 }
 
 const under = (root, platform, name) => (platform === 'win32' ? winPath(root, name) : posix.join(root, name));

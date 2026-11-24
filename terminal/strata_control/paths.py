@@ -17,5 +17,5 @@ def state_base(environ=None, *, windows: bool | None = None, home: Path | None =
     home = Path.home() if home is None else home
     if windows:
         local = environ.get("LOCALAPPDATA") or str(home / "AppData" / "Local")
-        return Path(local) / "Strata"
-    return Path(environ.get("XDG_STATE_HOME") or str(home / ".local" / "state")) / "strata"
+        return Path(local) / "RYZENStrata"
+    return Path(environ.get("XDG_STATE_HOME") or str(home / ".local" / "state")) / "ryzenstrata"

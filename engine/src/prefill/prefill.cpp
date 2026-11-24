@@ -291,9 +291,10 @@ bool prompt_run(const int64_t* tokens, int64_t n, int64_t pos0, const float* con
 namespace {
 // STRATA_PLE_COMPACT=1 (opt-in): the prompt chunk's PLE rows go up raw and are dequantized on the device (IQ4_NL tables
 // held in memory); the same floats as the host dequant, 7x fewer bytes over PCIe
+bool g_gpu_ple_required = false;
 bool ple_compact_on() {
     static const bool on = [] { const char* v = std::getenv("STRATA_PLE_COMPACT"); return v != nullptr && v[0] == '1'; }();
-    return on;
+    return g_gpu_ple_required || on;
 }
 // STRATA_PLE_COPY_STREAM=1 (opt-in, with PLE_COMPACT): the raw rows go up on a stream of their own instead of the compute
 // stream, which otherwise idles for the DMA (4.7 MB a 3K chunk = 2.9 ms on a Gen2 x4 link); the same bytes and kernels
@@ -3809,6 +3810,7 @@ int64_t Prefill::ring_max_slots() {
 
 int64_t Prefill::ring_slots_for(int64_t chunk) { return ring_slots((size_t) chunk); }
 void Prefill::set_cpu_pool(kernels::cpu::ExpertPool* pool) { cpu_pool_ = pool; }
+void Prefill::require_gpu_ple() { g_gpu_ple_required = true; }
 void Prefill::arm_cpu_share(bool applies, bool by_default) {
 #if !defined(STRATA_USE_HIP) && !defined(STRATA_HIP_GFX906)
     if (applies && by_default && cpu_share_explicit() == -2.0 && !g_share_default) {
@@ -4345,11 +4347,12 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
         }
         // STRATA_PLE_COMPACT=1: the raw rows (1,440 bytes a token instead of 10,240 floats' bytes) into the same pinned
         // buffer; ple_land uploads them and dequantizes on the device
-        if (ple_compact_on() && m.ple_pageable[buf].empty() && m.ple_raw_dev != nullptr &&
-            ss.ple.table->gather_raw_iq4nl(m.ple_rows[buf].data(), (size_t) T, (uint8_t*) m.ple_emb_host[buf])) {
-            m.ple_compact[buf] = true;
-            return true;
+        if (ple_compact_on() && m.ple_raw_dev != nullptr) {
+            m.ple_compact[buf] = ss.ple.table->gather_raw_iq4nl(m.ple_rows[buf].data(), (size_t) T,
+                                                              (uint8_t*) m.ple_emb_host[buf], &e);
+            if (m.ple_compact[buf] || g_gpu_ple_required) return m.ple_compact[buf];
         }
+        if (g_gpu_ple_required) { e = "prefill: GPU PLE staging allocation failed"; return false; }
         m.ple_compact[buf] = false;
         return ss.ple.table->gather_batch(m.ple_rows[buf].data(), (size_t) T, m.ple_emb_host[buf], e);
     };
@@ -4549,12 +4552,12 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
             // done, on whichever stream ran it, for the host-side reuse guard below.
             const bool ple_side = m.ple_compact[ple_buf] && m.ple_copy != nullptr;
             const cudaStream_t ple_up = ple_side ? m.ple_copy : m.cs;
+            void* const ple_dst = m.ple_compact[ple_buf] ? (void*) m.ple_raw_dev : (void*) m.ple_emb;
+            const size_t ple_bytes = m.ple_compact[ple_buf] ? raw_bytes : (size_t) T * N * 4;
             if ((ple_side && cudaStreamWaitEvent(m.ple_copy, m.ple_raw_free, 0) != cudaSuccess) ||
-                (m.ple_compact[ple_buf]
-                     ? cudaMemcpyAsync(m.ple_raw_dev, m.ple_emb_host[ple_buf], raw_bytes, cudaMemcpyHostToDevice, ple_up)
-                     : m.ple_pageable[ple_buf].empty()
-                     ? cudaMemcpyAsync(m.ple_emb, m.ple_emb_host[ple_buf], (size_t) T * N * 4, cudaMemcpyHostToDevice, m.cs)
-                     : m.up_ring.h2d(m.ple_emb, m.ple_emb_host[ple_buf], (size_t) T * N * 4, m.cs)) !=
+                (m.ple_pageable[ple_buf].empty()
+                     ? cudaMemcpyAsync(ple_dst, m.ple_emb_host[ple_buf], ple_bytes, cudaMemcpyHostToDevice, ple_up)
+                     : m.up_ring.h2d(ple_dst, m.ple_emb_host[ple_buf], ple_bytes, ple_up)) !=
                     cudaSuccess ||
                 cudaEventRecord(m.ple_copied[ple_buf], ple_up) != cudaSuccess ||
                 (ple_side && cudaStreamWaitEvent(m.cs, m.ple_copied[ple_buf], 0) != cudaSuccess)) {
@@ -9656,7 +9659,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
 #endif
     // layer-major prefill: STRATA_PREFILL_LAYER_MAJOR=1 / 0 win; unset, it is off everywhere (sm120_series.hpp prefill_layer_major_default: a layer split
     // reads 32K prompts 37-55% sooner chunk-major, owner's yes 2026-11-02; the single-card small-cache rule sets the variable itself)
-    if (hand_in_ == nullptr && impl_ &&
+    if (!g_gpu_ple_required && hand_in_ == nullptr && impl_ &&
         strata::prefill_layer_major_resolve(lm_env_text(), lm_hip, stage_count(), strata::qwen_defaults_026())) {
         const bool by_default = !lm_env_explicit();
         for (Prefill* p = this; p != nullptr; p = p->next_) p->lm_by_default_ = by_default;

@@ -13,6 +13,10 @@ import { nativeAction, useNative } from '../lib/native';
 /** The loaded model is shared by all chats; switching uses the existing lifecycle gates. */
 export function ChatModelPicker() {
     const native = useNative(), remote = useStore(s => s.remoteModel);
+    if(native?.ryzenEdition){
+        const model = native.instances.find(i => i.id === native.defaultId);
+        return <button className="chat-model-badge chat-model-picker" onClick={() => go('models')} title={tr("Manage models")}><Icon name="models" size={16}/><span>{model?.label ?? 'Qwen3.8-Flash-Next Q2_0'}</span></button>;
+    }
     return native?.instances.length && !remote ? <NativeChatModelPicker /> : <LegacyChatModelPicker />;
 }
 function NativeChatModelPicker() {

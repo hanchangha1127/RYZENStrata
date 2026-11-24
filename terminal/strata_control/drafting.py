@@ -734,6 +734,10 @@ def tuned_ok(data_dir: str | Path | None, variant: str | None = None) -> bool:
     return converted_ok(data_dir, size=pin.size, sha256=pin.sha256, name=pin.name)
 
 
+def stock_q4_ok(data_dir: str | Path | None) -> bool:
+    return converted_ok(data_dir, size=PACK_BYTES, sha256=PACK_SHA256, name=PACK_NAME)
+
+
 def uses_tuned(backend: str | None, model_name: str | None) -> bool:
     """Does this set on this engine family have a tuned-drafter entry (SET_DEFAULTS)? Entry level: whether this card qualifies is tuned_applies()."""
     return tuned_entry(backend, model_name) is not None
@@ -1734,6 +1738,8 @@ def apply(cfg: dict[str, Any], *, klass: str = "other", data_dir: str | Path | N
         mode = "off"                                          # "Draft layer (MTP)" turned off by the person, and no drafter chosen since: no drafter
     mine = cfg.get("user_args") or []
     pinned_pack = _flag_value(mine, "--draft-model")
+    if cfg.get("ryzen_profile") and data_dir and stock_q4_ok(data_dir):
+        pinned_pack = target_path(data_dir)
     slot_drafts = slot_drafts_by_default(mode, backend=backend, archs=archs, vram_mib=vram_mib, args=args, slots=slots, split=split,
                                          drafter_here=vocab is not None and form != FORM_NONE and (_here(Path(pinned_pack)) if pinned_pack is not None else drafter_ready(data_dir, name, backend)))
     decision = decide(mode, model_name=name, family=family, data_dir=data_dir, backend=backend, archs=archs,

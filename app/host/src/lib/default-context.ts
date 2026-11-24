@@ -6,14 +6,15 @@ import { BASE_CONTEXT, cacheGb, DENSE_GB, MTP_VRAM_GB, ownPathFits, type Context
  * Terminal still uses) is not what the app opens with.
  */
 export const DEFAULT_CONTEXT = 131072;
+export const RYZEN_DEFAULT_CONTEXT = 262144;
 /** What the Models page used to open with: a saved model that holds exactly this has never had a context chosen for it. */
 export const OLD_DEFAULT_CONTEXT = 32768;
 
 /** The default among the sizes a model offers: 128K, or the largest size under it. */
-export function defaultContext(choices: readonly number[] | null | undefined): number {
+export function defaultContext(choices: readonly number[] | null | undefined, target = DEFAULT_CONTEXT): number {
   const sizes = (choices ?? []).filter(n => Number.isFinite(n) && n > 0);
-  const under = sizes.filter(n => n <= DEFAULT_CONTEXT);
-  return under.length ? Math.max(...under) : sizes.length ? Math.min(...sizes) : DEFAULT_CONTEXT;
+  const under = sizes.filter(n => n <= target);
+  return under.length ? Math.max(...under) : sizes.length ? Math.min(...sizes) : target;
 }
 
 /**

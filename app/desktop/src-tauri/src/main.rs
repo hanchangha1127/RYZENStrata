@@ -37,7 +37,7 @@ use std::time::{Duration, Instant};
 
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 
-mod updater;
+mod shell_bridge;
 mod desktoplog;
 mod identity;
 mod recovery;
@@ -290,7 +290,7 @@ fn pick_port() -> Result<u16, String> {
 /// theme, text size, language and the chat list belongs to that origin, so a port that changed on every launch lost all
 /// of it. The preferred port is fixed; only when something else holds it does the app fall back to a free one (and that
 /// launch starts with empty storage, as before).
-const PREFERRED_PORT: u16 = 47831;
+const PREFERRED_PORT: u16 = 47841;
 
 /// Set when the port the person (or the app) wanted was busy: "busy:<wanted>:<used>". The host gets it as STRATA_PORT_NOTICE and tells the
 /// person (the chats and settings saved on the page belong to the port, so a different port starts empty) (#3402).
@@ -529,6 +529,7 @@ fn host_command(res: &Path, port: u16, shutdown_token: &str) -> Result<Command, 
         // metrics. `STRATA_PACKAGED` makes the host refuse to simulate; `STRATA_REAL_ENGINE` is set
         // for the same reason, so the monitor reports `none` instead of fabricated numbers.
         .env("STRATA_PACKAGED", "1")
+        .env("STRATA_RYZEN_EDITION", "1")
         .env("STRATA_REAL_ENGINE", "1")
         // the host leaves, after stopping what this app started, when this shell is gone (killed, crashed)
         .env("STRATA_EXIT_WITH_PARENT", "1")
@@ -562,9 +563,9 @@ fn start_host(app: &tauri::AppHandle) -> Result<u16, String> {
     // the host, which opens it in the default browser (#5072, #4721). Without it the mode was null and the click called window.open,
     // which the app window ignores. The Linux shell sets the same variable in supervisor.rs.
     cmd.env("STRATA_UI_MODE", "window");
-    // The signed app updater (Tauri) is reached by the host through a token-protected loopback bridge.
-    let bridge = updater::start(app, random_token(), port);
-    updater::apply_env(&mut cmd, app, bridge.as_ref());
+    // The token-protected bridge lets the host ask the shell to open a helper or show a notification.
+    let bridge = shell_bridge::start(app, random_token(), port);
+    shell_bridge::apply_env(&mut cmd, app, bridge.as_ref());
     *app.state::<ShutdownToken>().0.lock().unwrap() = Some(token);
 
     let node = node_binary(&res)?;
@@ -659,8 +660,8 @@ fn packaged_resource_dir(exe: &Path) -> Option<PathBuf> {
     let mut candidates = vec![dir.to_path_buf()];
     if let Some(up) = dir.parent() {
         candidates.push(up.join("Resources"));
-        candidates.push(up.join("lib").join("Strata"));
-        candidates.push(up.join("lib").join("strata-desktop"));
+        candidates.push(up.join("lib").join("RYZENStrata"));
+        candidates.push(up.join("lib").join("ryzenstrata"));
     }
     candidates
         .into_iter()
@@ -710,7 +711,7 @@ fn control_engine_notice(dir: &Path) -> (bool, String) {
     let empty = std::env::temp_dir().join(format!("strata-self-test-components-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&empty);
     let mut cmd = Command::new(&python);
-    cmd.arg(dir.join("strata.py")).args(["components", "engine", "--backend", "cuda", "--output", "json"])
+    cmd.arg(dir.join("strata.py")).args(["components", "engine", "--backend", "hip", "--output", "json"])
         .arg("--components-dir").arg(&empty).current_dir(dir)
         .env_remove("PYTHONHOME").env_remove("PYTHONPATH")
         .env("PYTHONNOUSERSITE", "1").env("PYTHONDONTWRITEBYTECODE", "1").env("STRATA_NO_ACQUIRE", "1");
@@ -800,6 +801,7 @@ fn run_self_test(report_path: &str) -> i32 {
         .env("STRATA_PORT", port.to_string())
         .env("STRATA_DIST", &dist)
         .env("STRATA_PACKAGED", "1")
+        .env("STRATA_RYZEN_EDITION", "1")
         .env("STRATA_REAL_ENGINE", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -934,7 +936,7 @@ fn main() {
         if !options.window_child {
             std::process::exit(supervisor::run(&options));
         }
-        // A window process its shell did not start is the app updater's restart (the shell that owned the window is stopping): start Strata again normally.
+        // A window process its shell did not start launches the app normally.
         if !supervisor::started_by_shell(std::env::var(supervisor::SHELL_PID_ENV).ok().as_deref(), std::os::unix::process::parent_id()) {
             std::process::exit(supervisor::restart_after_update());
         }
@@ -969,7 +971,6 @@ fn run_embedded() {
             }
         }))
         .plugin(tauri_plugin_shell::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
         .manage(HostProcess(Mutex::new(None)))
         .manage(HostPort(Mutex::new(None)))
@@ -1038,7 +1039,7 @@ fn devtools_wanted(value: Option<&str>) -> bool {
 fn open_window(app: &tauri::App, port: u16, shell_token: &str) -> Result<(), Box<dyn std::error::Error>> {
     let origin = format!("http://127.0.0.1:{port}");
     let url = origin.parse().expect("a valid loopback URL");
-    let builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url)).title("Strata").inner_size(1440.0, 920.0).min_inner_size(900.0, 600.0)
+    let builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url)).title("RYZENStrata").inner_size(1440.0, 920.0).min_inner_size(900.0, 600.0)
         .devtools(devtools_wanted(std::env::var("STRATA_DEVTOOLS").ok().as_deref()));
     // Dropping pictures on the chat (QA report 1, item 4). Windows: the shell's own file-drop handler is off, because with it on the system hands
     // the dropped file to the shell and the page never sees it; with it off the page gets ordinary drag and drop events (app/host DropZone), as
@@ -1292,7 +1293,7 @@ fn hand_over_drop(window: tauri::WebviewWindow, port: u16, token: String, paths:
     });
 }
 
-/// Linux window process: shows the page of the host the shell started and registers the app updater with it. It starts no host and
+/// Linux window process: shows the page of the host the shell started and registers the shell bridge. It starts no host and
 /// stops nothing: when the window closes it just exits, and the shell stops the host. If WebKit crashes this process, only this
 /// process dies; the shell moves to browser mode.
 #[cfg(target_os = "linux")]
@@ -1331,11 +1332,10 @@ fn run_window_process() -> ! {
             }
         }))
         .plugin(tauri_plugin_shell::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(move |app| {
-            // The signed app updater (Tauri) is reached by the host through a token-protected loopback bridge; tell the host where it is.
+            // Tell the host where to reach the token-protected shell bridge.
             let bridge_token = random_token();
-            if let Some(bridge) = updater::start(app.handle(), bridge_token, port) {
+            if let Some(bridge) = shell_bridge::start(app.handle(), bridge_token, port) {
                 let body = serde_json::json!({ "bridge": { "url": bridge.url, "token": bridge.token } }).to_string();
                 if let Err(e) = http_request_body(
                     "POST",
@@ -1343,7 +1343,7 @@ fn run_window_process() -> ! {
                     &[("x-strata-shutdown", token.as_str()), ("content-type", "application/json")],
                     Some(&body),
                 ) {
-                    eprintln!("[strata] the app updater could not be registered with the host: {e}");
+                    eprintln!("[strata] the shell bridge could not be registered with the host: {e}");
                 }
             }
             open_window(app, port, &token)
@@ -1530,7 +1530,7 @@ mod tests {
         for (exe_rel, res_rel) in [
             ("Contents/MacOS/strata-desktop", "Contents/Resources"),
             ("install/strata-desktop.exe", "install"),
-            ("usr/bin/strata-desktop", "usr/lib/Strata"),
+            ("usr/bin/ryzenstrata-desktop", "usr/lib/RYZENStrata"),
         ] {
             let exe = root.join(exe_rel);
             let res = root.join(res_rel);

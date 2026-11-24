@@ -22,7 +22,12 @@ export const HY4_FAMILY='hy4-flash';
 /** Thinking Machines Inkling-2-Mini (setup.py INKLING_FAMILIES, its own shape engine strata-inkling). */
 export const INKLING_FAMILY='inkling-2-mini';
 /** Display groups are distinct from the engine's installation family IDs. */
-export function nativeCatalogModels(families:NativeFamily[]):CatalogModel[]{
+export function nativeCatalogModels(families:NativeFamily[], ryzen = false):CatalogModel[]{
+ if(ryzen){
+  const family=families.find(f=>f.family==='qwen');
+  const size=family?.sizes.find(s=>s.model==='Q2_0');
+  return family&&size?[{...family,images:false,sizes:[{...size,sourceFamily:'qwen',edition:'ISTA-DASLab',images:false,imagesCapable:false}]}]:[];
+ }
  if(!families.length)return[];
  const groups:CatalogModel[]=[{family:'qwen3.8',title:'Qwen3.8-Flash-Next',about:'',experimental:false,images:false,sizes:[]},{family:'qwen3.6',title:'Qwen3.6-35B-A3B',about:'',experimental:false,images:false,sizes:[]}];
  for(const family of families){

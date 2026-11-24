@@ -26,8 +26,9 @@ export function bundledPython(dir, platform = process.platform) {
 /** The per-user component folder, the same rule as strata_control/engine_component.py components_dir(). */
 export function componentsDirectory({ env = process.env, platform = process.platform, home = homedir() } = {}) {
   if (env.STRATA_COMPONENTS_DIR) return env.STRATA_COMPONENTS_DIR;
-  if (platform === 'win32') return join(env.LOCALAPPDATA || join(home, 'AppData', 'Local'), 'Strata', 'components');
-  return join(env.XDG_DATA_HOME || join(home, '.local', 'share'), 'strata', 'components');
+  const ryzen = env.STRATA_RYZEN_EDITION === '1';
+  if (platform === 'win32') return join(env.LOCALAPPDATA || join(home, 'AppData', 'Local'), ryzen ? 'RYZENStrata' : 'Strata', 'components');
+  return join(env.XDG_DATA_HOME || join(home, '.local', 'share'), ryzen ? 'ryzenstrata' : 'strata', 'components');
 }
 
 /**
@@ -57,7 +58,7 @@ function newer(a, b) {
  * in that order. Returns null in a source checkout (the host then keeps its older paths).
  */
 export function findControl({ env = process.env, platform = process.platform, exists = existsSync, hostDir = resolve(HERE, '..'), components = null } = {}) {
-  const updated = updatedControlDirectory({ env, platform, components });
+  const updated = env.STRATA_RYZEN_EDITION === '1' ? null : updatedControlDirectory({ env, platform, components });
   const candidates = [{ dir: env.STRATA_CONTROL_DIR }, { dir: join(hostDir, '..', 'control') }, ...(updated ? [updated] : [])]
     .filter(c => c.dir).map(c => ({ ...c, dir: resolve(c.dir) }));
   let best = null;

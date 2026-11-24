@@ -1,10 +1,10 @@
 @echo off
-rem Strata for Windows: the first run installs everything and starts the model; later runs just start it.
-rem Needs only an NVIDIA or AMD graphics driver. Python is installed for your user account if it is missing (no admin needed).
+rem RYZENStrata for Windows x64: run Ryzen AI Max setup and start the model.
+rem Python is installed for your user account if it is missing (no admin needed).
 setlocal
 rem Python reads and writes text as UTF-8, not in the Windows code page (cp1251, cp866, ...): a folder or user name with Cyrillic or other letters stays intact (#3202).
 set "PYTHONUTF8=1"
-title Strata
+title RYZENStrata
 cd /d "%~dp0"
 rem the Terminal's sources and everything setup writes live in terminal\ (0.2.16 layout); an older clone's .venv moves there once
 if exist "terminal\setup.py" (

@@ -41,8 +41,8 @@ def profile_dir() -> Path:
         return Path(explicit).expanduser()
     if os.name == "nt":
         base = os.environ.get("APPDATA")
-        return (Path(base) if base else Path.home() / "AppData" / "Roaming") / "Strata" / "profiles"
-    return Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "strata" / "profiles"
+        return (Path(base) if base else Path.home() / "AppData" / "Roaming") / "RYZENStrata" / "profiles"
+    return Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "ryzenstrata" / "profiles"
 
 
 def _name(name: str) -> str:

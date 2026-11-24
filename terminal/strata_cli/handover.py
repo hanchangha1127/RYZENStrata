@@ -38,8 +38,8 @@ def components_dir(environ=None) -> Path:
         return Path(environ["STRATA_COMPONENTS_DIR"])
     home = Path.home()
     if os.name == "nt":
-        return Path(environ.get("LOCALAPPDATA") or str(home / "AppData" / "Local")) / "Strata" / "components"
-    return Path(environ.get("XDG_DATA_HOME") or str(home / ".local" / "share")) / "strata" / "components"
+        return Path(environ.get("LOCALAPPDATA") or str(home / "AppData" / "Local")) / "RYZENStrata" / "components"
+    return Path(environ.get("XDG_DATA_HOME") or str(home / ".local" / "share")) / "ryzenstrata" / "components"
 
 
 def version_key(text) -> tuple[int, ...] | None:

@@ -48,6 +48,7 @@ public:
 
     /// Reads the pack (tools/dflash2_pack.py) to the GPU `device` and allocates the ring and the buffers (about 0.8 GB).
     bool load(const std::string& pack_path, int device, std::string& err);
+    bool is_q4_0() const { return q4_; }
     /// The target's embedding and head (and the draft vocabulary file, "" or missing: the whole head).
     /// `head_device` >= 0 and not this card's: the head sits on another card (a layer split's last stage); the draft vocabulary's rows are gathered there and
     /// copied over once, so the drafter can sit on the first stage's card.

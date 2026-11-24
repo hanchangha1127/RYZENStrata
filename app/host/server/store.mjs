@@ -12,7 +12,8 @@ import { defaultModelDirectory } from './model-directory-default.mjs';
  * folder next to the checkout rather than failing to boot.
  */
 function resolveHome() {
-  const candidates = [process.env.STRATA_HOME, join(homedir(), '.strata'), join(process.cwd(), '.strata')].filter(
+  const folder = process.env.STRATA_RYZEN_EDITION === '1' ? '.ryzenstrata' : '.strata';
+  const candidates = [process.env.STRATA_HOME, join(homedir(), folder), join(process.cwd(), folder)].filter(
     Boolean,
   );
   for (const dir of candidates) {

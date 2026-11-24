@@ -313,7 +313,7 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
     src/core/conversation_snapshot.cpp src/core/conversation_state.cpp src/core/conversation_memory.cpp src/core/peer_experts.cpp
     src/core/arch_defaults.cpp src/core/nv_defaults.cpp src/core/vmm.cpp src/core/conversation_file.cpp)
   target_include_directories(strata_engine PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-  target_link_libraries(strata_engine PUBLIC strata_core strata_kernels strata_kernels_cpu ${_strata_gpu_runtime_target})
+  target_link_libraries(strata_engine PUBLIC strata_core strata_kernels strata_host_support ${_strata_gpu_runtime_target})
   if(STRATA_BUILD_TESTS AND STRATA_ENABLE_CUDA AND NOT STRATA_HIP_GFX906)
     add_executable(host_graph_launch_test tests/core/host_graph_launch_test.cu)
     target_include_directories(host_graph_launch_test PRIVATE include)
@@ -555,32 +555,6 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
     # C++ runtime sit beside the exe (tools/hip/package_windows.py) and stay normal imports.
     target_link_libraries(strata PRIVATE delayimp)
     target_link_options(strata PRIVATE "LINKER:/DELAYLOAD:hipblas.dll" "LINKER:/DELAYLOAD:libhipblaslt.dll" "LINKER:/DELAYLOAD:rocblas.dll")
-  endif()
-
-  # NEW-MODELS-PLAN.md T1: Qwen3.6-35B-A3B's reference path (one GPU, the model resident, plain kernels), checked
-  # against llama.cpp by tools/qwen35/; the engine itself does not run the family yet
-  add_executable(strata-q36ref src/qwen35/q36ref.cu)
-  target_include_directories(strata-q36ref PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${_strata_gpu_include_directories})
-  target_link_libraries(strata-q36ref PRIVATE strata_kernels strata_warnings ${_strata_gpu_runtime_target})
-  # the engine path for the same family (serve protocol, prompt chunks, decode graph): src/qwen35/q36_engine.cu, a
-  # library that `strata` switches to for a qwen35moe model (the family switch at the top of its main) and that
-  # strata-q36 wraps on its own.  Not on gfx906 (#3172, #3271): it calls cuBLAS entry points the wave64 compat layer does
-  # not map (cublasSgemm, cublasGemmStridedBatchedEx) and its kernels assume 32-lane warps; main() guards every use with
-  # STRATA_HAVE_QWEN35, so a gfx906 build links and runs the Qwen3.8 family, and `strata --families` says so
-  if(NOT STRATA_HIP_GFX906)
-  add_library(strata_qwen35 STATIC src/qwen35/q36_engine.cu)
-  target_include_directories(strata_qwen35 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include PRIVATE ${_strata_gpu_include_directories})
-  target_link_libraries(strata_qwen35 PRIVATE strata_prefill strata_kernels strata_warnings ${_strata_gpu_runtime_target})
-  if(STRATA_NATIVE_EXPERTS)
-    # the hybrid mode (experts that do not all fit in VRAM): the CPU expert pool on ggml-cpu's arithmetic
-    target_link_libraries(strata_qwen35 PRIVATE strata_kernels_cpu)
-    target_compile_definitions(strata_qwen35 PRIVATE STRATA_Q36_CPU_POOL=1)
-  endif()
-  add_executable(strata-q36 src/qwen35/q36_main.cpp)
-  strata_utf8_manifest(strata-q36)
-  target_link_libraries(strata-q36 PRIVATE strata_qwen35 ${_strata_gpu_runtime_target})
-  target_link_libraries(strata PRIVATE strata_qwen35)
-  target_compile_definitions(strata PRIVATE STRATA_HAVE_QWEN35=1)
   endif()
 
   if(STRATA_ENABLE_HIP)
