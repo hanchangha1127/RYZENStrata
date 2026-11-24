@@ -1,5 +1,8 @@
 """Checks for the launch defaults and strict runtime configuration of RYZENStrata."""
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 from strata_cli.launch.settings import LaunchSettings
 from strata_control import ryzen_policy as policy
@@ -43,6 +46,20 @@ def test_runtime_settings_replace_overrides_and_validate_the_native_profile():
     assert "--mtp" not in cfg["args"] and "--resident-experts" not in cfg["args"]
     assert policy.runtime_problem({**cfg, "gpu": [0, 1]})
     assert policy.runtime_problem({**cfg, "drafting": "mtp"})
+
+
+@pytest.mark.parametrize("os_name, default_flags", [("nt", ["--ssd-experts"]), ("posix", [])])
+def test_saved_ryzen_configs_use_the_platform_expert_io_default(monkeypatch, os_name, default_flags):
+    from serve import server
+
+    monkeypatch.setattr(server, "os", SimpleNamespace(name=os_name))
+    saved_flags = ["--mmap-experts"]
+    cfg = {"ryzen_profile": True, "drafting": "off", "args": saved_flags}
+    assert server.engine_args(cfg, announce=False) == ["--mmap-experts", *default_flags]
+    assert saved_flags == ["--mmap-experts"]
+
+    saved_flags.append("--ssd-experts")
+    assert server.engine_args(cfg, announce=False) == saved_flags
 
 
 def test_stock_drafter_is_verified_and_has_no_fallback(monkeypatch):

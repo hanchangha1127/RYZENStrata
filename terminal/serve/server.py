@@ -3671,6 +3671,9 @@ def engine_args(cfg: dict, exe: str | None = None, *, announce: bool = True) -> 
     and without leaving a note for the next engine start (the retry arguments of mtp_retry_args)."""
     if cfg.get("ryzen_profile"):
         args = list(cfg["args"])
+        # Stream the Windows expert-cache fill without keeping GGUF pages in the OS file cache.
+        if os.name == "nt" and "--ssd-experts" not in args:
+            args.append("--ssd-experts")
         if cfg.get("drafting") == ryzen_policy.DRAFTER:
             data = drafting.data_dir_of(args)
             vocab = drafting.vocab_path(args, data)
