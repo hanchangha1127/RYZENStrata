@@ -11,7 +11,7 @@ Give this repository URL to an AI agent with shell access on the machine that wi
 | Windows x64 | `py -3 tools/agent_setup.py` |
 | Native x86-64 Linux | `python3 tools/agent_setup.py` |
 
-Append `--plan` to check the hardware, SSD, and planned downloads without installing anything. The [setup guide](docs/AI_SETUP.md) lists prerequisites and shows how to use a different SSD.
+Append `--plan` to check the hardware, SSD, and planned downloads without installing anything. On Windows, setup can use the checksum-verified release engine without a compiler. The [setup guide](docs/AI_SETUP.md) lists prerequisites and shows how to use a different SSD.
 
 ## Hardware and defaults
 
@@ -31,9 +31,11 @@ Append `--plan` to check the hardware, SSD, and planned downloads without instal
 
 The model publisher lists 37.6 GB of transformer weights and a 28.8 GB N-gram table. Keep the model on an SSD. The context window, drafter, engine scratch buffers, and operating system need additional memory. The CPU and GPU share one memory pool, so count that memory once. Actual maximum context depends on how much memory the engine and driver can allocate. [Model files and memory requirements](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF#memory-requirements)
 
+The Windows release and the measured before-and-after results are available here. [Windows HIP engine](https://github.com/hanchangha1127/RYZENStrata/releases/tag/ryzen-v0.1.0) · [Ryzen AI Max+ 395 benchmark](docs/bench-results/2026-11-24-ryzen395-q2/README.md)
+
 ## Run from source
 
-Use a RYZENStrata HIP engine built from this checkout. The [setup guide](docs/AI_SETUP.md) covers the native Windows and Linux entry points, model storage, and launch checks. The [technical reference](docs/AI_REFERENCE.md) lists the runtime settings and local API addresses.
+On Windows, append `--build-engine` to build the HIP engine from this checkout. Linux setup builds the engine locally. The [setup guide](docs/AI_SETUP.md) covers the native Windows and Linux entry points, model storage, and launch checks. The [technical reference](docs/AI_REFERENCE.md) lists the runtime settings and local API addresses.
 
 ## License
 

@@ -177,6 +177,7 @@ def main() -> int:
                 sys.exit(f"missing {f}: install the rocm-sdk-device-{arch} wheel and run rocm-sdk init")
             shutil.copy2(f, kp / f.name)
 
+    shutil.copy2(ROOT.parent / "LICENSE", stage / "LICENSE")
     lic = stage / "rocm" / "licenses"
     lic.mkdir()
     for comp in LICENSES:

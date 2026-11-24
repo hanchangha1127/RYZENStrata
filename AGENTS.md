@@ -27,10 +27,11 @@ downloading models. The default local API listens on `127.0.0.1`.
    `python3 tools/agent_setup.py --plan` on native x86-64 Linux. Check the
    installed memory and SSD result. Pass `--data-dir` to select a local SSD if
    the default directory is unsuitable.
-3. Run the same command without `--plan`. It builds or reuses the fork's HIP
-   engine, prepares the pinned Q2_0 and DFlash2 files, and starts the server.
-   If the build stops, resolve the indicated prerequisite on the target machine
-   before retrying. See [docs/AI_SETUP.md](docs/AI_SETUP.md).
+3. Run the same command without `--plan`. Windows setup downloads the pinned
+   release engine or reuses a compatible local engine. Linux setup builds the
+   HIP engine. Setup reads the routed experts from the original Q2_0 GGUF,
+   prepares the DFlash2 Q4_0 drafter and starts the local server.
+   See [docs/AI_SETUP.md](docs/AI_SETUP.md).
 4. Wait for `RYZENStrata answered at http://127.0.0.1:8080/v1` or the selected
    `--port`. Report the verified local address and any failure that prevented
    the test chat request from completing.
