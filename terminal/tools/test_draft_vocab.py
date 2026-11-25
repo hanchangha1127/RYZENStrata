@@ -49,11 +49,11 @@ class Coverage(unittest.TestCase):
         self.assertNotIn("arabic", DV.scripts_of("hello world"))
         self.assertNotIn("arabic", DV.scripts_of("привет"))
 
-    def test_japanese_profile_includes_kana_and_first_level_kanji_compounds(self):
+    def test_japanese_profile_includes_kana_and_kanji_compounds(self):
         japanese = set(DV.GROUPS["ja"])
         self.assertTrue(DV.scripts_of(" 日本語") & japanese)
         self.assertTrue(DV.scripts_of("ください") & japanese)
-        self.assertFalse(DV.scripts_of("解释") & japanese)
+        self.assertTrue(DV.scripts_of("髙") & japanese)
         self.assertFalse(DV.scripts_of("한국어") & japanese)
 
 

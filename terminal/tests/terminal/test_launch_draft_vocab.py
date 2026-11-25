@@ -40,17 +40,17 @@ class DraftVocab(unittest.TestCase):
     def test_every_name_reaches_setup_and_the_preset_keeps_it(self):
         for name in S.DRAFT_VOCAB_MODES:
             with self.subTest(name=name), Home():
-                s, _ = cmd.settings_from_args(parse("--model", "IQ3_XXS", "--draft-vocab", name), catalog=catalog(HW_12))
+                s, _ = cmd.settings_from_args(parse("--model", "Q2_0", "--draft-vocab", name), catalog=catalog(HW_12))
                 self.assertEqual(s.draft_vocab, name)
                 again = S.LaunchSettings.from_dict(s.to_dict())
                 self.assertEqual(again.draft_vocab, name)
-                args = Runner(again.copy(family="qwen", context=32768, kv="q4_0", vision="off"), catalog=catalog(HW_12)).setup_args()
+                args = Runner(again.copy(family="qwen", context=32768, kv="int8", vision="off"), catalog=catalog(HW_12)).setup_args()
                 self.assertEqual(args[args.index("--draft-vocab") + 1], name)
                 self.assertIn(f"--draft-vocab {name}", S.flags_text(again))
 
     def test_without_it_nothing_is_passed(self):
         with Home():
-            args = Runner(S.LaunchSettings(family="qwen", model="IQ3_XXS", context=32768, kv="q4_0", vision="off"), catalog=catalog(HW_12)).setup_args()
+            args = Runner(S.LaunchSettings(family="qwen", model="Q2_0", context=32768, kv="int8", vision="off"), catalog=catalog(HW_12)).setup_args()
         self.assertNotIn("--draft-vocab", args)
 
     def test_an_unknown_name_is_refused(self):

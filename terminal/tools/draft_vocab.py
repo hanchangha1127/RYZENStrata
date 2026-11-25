@@ -9,8 +9,8 @@ Chinese drafted almost nothing (#137).  This adds whole scripts to a subset:
         --out data/draft_vocab.bin
 
 Use `--base data/draft_vocab_en.bin --add ko`, `--add ja`, or `--add zh` to reproduce the
-RYZENStrata request-language subsets. Korean adds Hangul, Japanese adds kana and words written
-with JIS X 0208 level-one kanji, and Chinese adds Han. All three include CJK punctuation.
+RYZENStrata request-language subsets. Korean adds Hangul, Japanese adds kana and Han,
+and Chinese adds Han. All three include CJK punctuation.
 The base ids keep their order and the added ids follow in id order. --stats prints what a subset holds.
 
 A language written in a script the base already holds (French, Spanish, German... in Latin letters) needs specific
@@ -50,7 +50,7 @@ SCRIPTS = {
     "arabic": [(0x0600, 0x06FF), (0x0750, 0x077F), (0x08A0, 0x08FF), (0xFB50, 0xFDFF), (0xFE70, 0xFEFF)],
 }
 GROUPS = {"cjk": ["han", "kana", "hangul", "cjk_punct"], "ko": ["hangul", "cjk_punct"],
-          "ja": ["kana", "jis1", "cjk_punct"], "zh": ["han", "cjk_punct"]}
+          "ja": ["kana", "han", "cjk_punct"], "zh": ["han", "cjk_punct"]}
 
 
 def scripts_of(text: str) -> set[str]:
@@ -60,14 +60,6 @@ def scripts_of(text: str) -> set[str]:
         for name, ranges in SCRIPTS.items():
             if any(a <= c <= b for a, b in ranges):
                 found.add(name)
-    if "han" in found:
-        # JIS X 0208 rows 16 through 47 hold the first-level kanji. Keep whole kanji compounds.
-        try:
-            encoded = text.strip().encode("euc_jp")
-        except UnicodeEncodeError:
-            return found
-        if len(encoded) % 2 == 0 and all(0xB0 <= b <= 0xCF for b in encoded[::2]):
-            found.add("jis1")
     return found
 
 
@@ -128,7 +120,7 @@ def main() -> int:
     want = set()
     for x in filter(None, (s.strip() for s in a.add.split(","))):
         names = GROUPS.get(x, [x])
-        if any(nm not in SCRIPTS and nm != "jis1" for nm in names):
+        if any(nm not in SCRIPTS for nm in names):
             sys.exit(f"--add {x}: expected one of {', '.join([*SCRIPTS, *GROUPS])}")
         want.update(names)
     if not 0 < a.coverage <= 1:
