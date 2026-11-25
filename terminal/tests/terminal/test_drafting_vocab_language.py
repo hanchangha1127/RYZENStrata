@@ -235,6 +235,28 @@ class ThePickAtStart(unittest.TestCase):
 
 
 class TheShippedFiles(unittest.TestCase):
+    def test_request_profiles_share_the_english_code_prefix_and_fit_this_model(self):
+        profiles = drafting.request_vocab_paths()
+        self.assertEqual(set(profiles), {"en", "ko", "ja", "zh", "fr"})
+        base = profiles["en"].read_bytes()
+        for lang, path in profiles.items():
+            with self.subTest(lang=lang):
+                raw = path.read_bytes()
+                self.assertTrue(raw.startswith(base))
+                ids = [token for token, in struct.iter_unpack("<i", raw)]
+                self.assertEqual(len(set(ids)), len(ids))
+                self.assertGreaterEqual(min(ids), 0)
+                self.assertLess(max(ids), drafting.PACK_TARGET["vocab"])
+
+    def test_request_profiles_omit_damaged_and_missing_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            en = (DATA / "draft_vocab_en.bin").read_bytes()
+            (root / "draft_vocab_en.bin").write_bytes(en)
+            (root / "draft_vocab_ko.bin").write_bytes(bytes((DATA / "draft_vocab_ko.bin").stat().st_size))
+            with mock.patch.object(drafting, "shipped_vocab", return_value=root / "draft_vocab.bin"):
+                self.assertEqual(drafting.request_vocab_paths(), {"en": root / "draft_vocab_en.bin"})
+
     def test_every_registered_choice_has_its_file_and_the_file_fits_the_vocabulary(self):
         for choice, name in drafting.VOCAB_FILES.items():
             path = DATA / name

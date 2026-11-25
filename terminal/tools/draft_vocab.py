@@ -8,8 +8,10 @@ Chinese drafted almost nothing (#137).  This adds whole scripts to a subset:
     python tools/draft_vocab.py --gguf <model>-00001-of-0000N.gguf --base data/draft_vocab.bin --add cjk \
         --out data/draft_vocab.bin
 
---add takes han, kana, hangul, cjk_punct, cjk (those four), cyrillic or arabic.  The base ids keep their order; the added ones follow in
-id order.  --stats prints what a subset holds.
+Use `--base data/draft_vocab_en.bin --add ko`, `--add ja`, or `--add zh` to reproduce the
+RYZENStrata request-language subsets. Korean adds Hangul, Japanese adds kana and words written
+with JIS X 0208 level-one kanji, and Chinese adds Han. All three include CJK punctuation.
+The base ids keep their order and the added ids follow in id order. --stats prints what a subset holds.
 
 A language written in a script the base already holds (French, Spanish, German... in Latin letters) needs specific
 words and word pieces, not a whole script.  --corpus adds the tokens of a text corpus in that language: the most
@@ -47,7 +49,8 @@ SCRIPTS = {
     # Arabic, Persian/Farsi, Urdu, Pashto, Kurdish, Sindhi, Uyghur (#6578: the default subset held 33 of 8,826 Arabic tokens)
     "arabic": [(0x0600, 0x06FF), (0x0750, 0x077F), (0x08A0, 0x08FF), (0xFB50, 0xFDFF), (0xFE70, 0xFEFF)],
 }
-GROUPS = {"cjk": ["han", "kana", "hangul", "cjk_punct"]}
+GROUPS = {"cjk": ["han", "kana", "hangul", "cjk_punct"], "ko": ["hangul", "cjk_punct"],
+          "ja": ["kana", "jis1", "cjk_punct"], "zh": ["han", "cjk_punct"]}
 
 
 def scripts_of(text: str) -> set[str]:
@@ -57,6 +60,14 @@ def scripts_of(text: str) -> set[str]:
         for name, ranges in SCRIPTS.items():
             if any(a <= c <= b for a, b in ranges):
                 found.add(name)
+    if "han" in found:
+        # JIS X 0208 rows 16 through 47 hold the first-level kanji. Keep whole kanji compounds.
+        try:
+            encoded = text.strip().encode("euc_jp")
+        except UnicodeEncodeError:
+            return found
+        if len(encoded) % 2 == 0 and all(0xB0 <= b <= 0xCF for b in encoded[::2]):
+            found.add("jis1")
     return found
 
 
@@ -99,7 +110,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--gguf", required=True, help="the model's (first) GGUF file: its vocabulary")
     ap.add_argument("--base", help="the subset to extend (int32 ids)")
-    ap.add_argument("--add", default="", help="comma list: han, kana, hangul, cjk_punct, cjk, cyrillic, arabic")
+    ap.add_argument("--add", default="", help="comma list: han, kana, hangul, cjk_punct, cjk, ko, ja, zh, cyrillic, arabic")
     ap.add_argument("--corpus", nargs="+", default=[], help="UTF-8 text files in the language to add (#597)")
     ap.add_argument("--coverage", type=float, default=0.99,
                     help="with --corpus: the share of its token occurrences the added tokens cover (default 0.99)")
@@ -117,7 +128,7 @@ def main() -> int:
     want = set()
     for x in filter(None, (s.strip() for s in a.add.split(","))):
         names = GROUPS.get(x, [x])
-        if any(nm not in SCRIPTS for nm in names):
+        if any(nm not in SCRIPTS and nm != "jis1" for nm in names):
             sys.exit(f"--add {x}: expected one of {', '.join([*SCRIPTS, *GROUPS])}")
         want.update(names)
     if not 0 < a.coverage <= 1:

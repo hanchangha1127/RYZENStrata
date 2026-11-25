@@ -78,3 +78,22 @@ def test_stock_drafter_is_verified_and_has_no_fallback(monkeypatch):
     assert args.count("--spec") == 1
     assert args[args.index("--spec") + 1] == str(policy.DFLASH_WINDOW)
     assert "--mtp" not in args
+
+
+def test_request_vocab_uses_verified_profiles_and_respects_fixed_vocab(monkeypatch, tmp_path):
+    from serve import server
+    from strata_control import drafting
+
+    cfg = {"model_name": policy.MODEL_NAME, "args": ["--pack", str(tmp_path / "packs" / "q2_0"),
+                                                    "--native", "q2_0.gguf"], "gpu": 0}
+    policy.apply_runtime(cfg, policy.DEFAULT_CONTEXT, policy.DRAFTER)
+    monkeypatch.setattr(drafting, "stock_q4_ok", lambda _: True)
+    monkeypatch.setattr(server, "engine_has_text", lambda *_: True)
+    args = server.engine_args(cfg, "strata.exe", announce=False)
+    assert args[args.index("--draft-vocab-dir") + 1] == str(drafting.shipped_vocab().parent)
+    fixed = {"user_args": ["--mtp-draft-vocab", str(drafting.shipped_vocab("fr"))]}
+    args = server.engine_args({**cfg, **fixed}, "strata.exe", announce=False)
+    assert "--draft-vocab-dir" not in args
+    assert args[args.index("--mtp-draft-vocab") + 1] == str(drafting.shipped_vocab("fr"))
+    monkeypatch.setattr(server, "engine_has_text", lambda *_: False)
+    assert "--draft-vocab-dir" not in server.engine_args(cfg, "legacy.exe", announce=False)

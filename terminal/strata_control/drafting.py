@@ -1453,6 +1453,36 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+_REQUEST_VOCAB_PINS = {
+    "en": (40525, "369151522226a5edaa5f12cfd1e2ae7db8f4fbdbd222f3dcf327dced9597fb25"),
+    "ko": (47493, "8de2bec33e6a866311c70ec35ca58eec8048c9645b49ee94ef5bce523055174f"),
+    "ja": (69188, "01203a4bff9c0de7c9e6b67daa902e4636afd046698f60b3df8923863c7a950a"),
+    "zh": (96014, "96c1781a9662515fcba0f8b595b7d9f41057c49c7b4f66cb89cb6fb7a296bcb6"),
+    "fr": (46211, "42b9993629f757c17ad30fc8c242533cb702330f359e85ba729a70d10ef12a81"),
+}
+
+
+def request_vocab_paths(current: Path | None = None) -> dict[str, Path]:
+    """Verify the bundled profiles. Preserve a locally customized starting vocabulary."""
+    default = shipped_vocab()
+    if current is not None:
+        try:
+            if _sha256(current) != _sha256(default):
+                return {}
+        except OSError:
+            return {}
+    folder = default.parent
+    paths = {}
+    for language, (rows, digest) in _REQUEST_VOCAB_PINS.items():
+        path = folder / f"draft_vocab_{language}.bin"
+        try:
+            if path.stat().st_size == rows * 4 and _sha256(path) == digest:
+                paths[language] = path
+        except OSError:
+            continue
+    return paths
+
+
 def vocab_target(data_dir: str | Path) -> Path:
     """Where the DFlash2 install keeps its copy of the draft vocabulary: next to the pack, so an install that never downloaded the MTP layer has one."""
     return Path(data_dir) / FOLDER / VOCAB_NAME

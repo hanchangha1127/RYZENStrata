@@ -22,8 +22,8 @@ RECOMMENDED_VRAM_GIB = 48
 GPU_ONLY_FLAG = "--gpu-experts-only"
 MODEL_ERROR = f"This edition supports only {TITLE}."
 GPU_ERROR = "This edition requires the integrated AMD Radeon gfx1151 GPU."
-ENGINE_PROFILE = "RYZENStrata HIP profile v2"
-ENGINE_ERROR = f"This edition requires {ENGINE_PROFILE}. Build the engine from this checkout."
+ENGINE_PROFILE = "RYZENStrata HIP profile v3"
+ENGINE_ERROR = f"This edition requires {ENGINE_PROFILE}. Run the setup from this checkout to update the engine."
 CPU_NAME = re.compile(r"\bAMD Ryzen AI Max\+\s+(?:PRO\s+)?(?:395|495)\b", re.IGNORECASE)
 
 

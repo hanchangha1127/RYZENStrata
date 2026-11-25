@@ -346,6 +346,7 @@ from strata_control import speed_switches  # noqa: E402
 from strata_control import vision_reader  # noqa: E402
 from strata_control import draft_layer  # noqa: E402
 from strata_control import drafting  # noqa: E402
+from strata_control.draft_language import detect_language  # noqa: E402
 from strata_control import ryzen_policy  # noqa: E402
 from strata_control import vram_fit  # noqa: E402
 from strata_control import user_args  # noqa: E402
@@ -779,6 +780,8 @@ class StrataEngine:
         self.max_context = int(args[args.index("--max-context") + 1]) if "--max-context" in args else 4096
         self.can_stop = False            # the engine honours a STOP line mid-request (READY <ctx> stop)
         self.can_hold = False            # the engine takes GEN hold=N:ID (READY <ctx> ... hold)
+        self.request_vocab = "--draft-vocab-dir" in args
+        self.can_draft_lang = False
         self.can_hold_batch = False      # ... and its --batch slots end at the hold too, BDONE hold (READY ... holdb)
         self.last = {}
         self.info = {}                   # INFO key=value facts (engine 0.1.8+): kv, expert slots, ... (Monitor tab)
@@ -867,6 +870,7 @@ class StrataEngine:
                 self.max_context = int(f[1])
                 self.can_stop = "stop" in f[2:]
                 self.can_hold = "hold" in f[2:]
+                self.can_draft_lang = "draft_lang=1" in f[2:]
                 self.can_hold_batch = "holdb" in f[2:]
                 break
         loading.set()
@@ -2651,6 +2655,8 @@ class StrataEngine:
             if embeddings or int(max_new) != 0:
                 raise ValueError("prefill_only is a text prompt and max_new 0")
             head = "GEN 0 prefill=1"
+        elif getattr(self, "can_draft_lang", False) and getattr(cancel, "_strata_draft_lang", None):
+            head += f" draft_lang={cancel._strata_draft_lang}"
         line = f"{head} {','.join(str(int(t)) for t in ids)}\n"   # (a bad id stays the request's own ValueError)
         try:
             self.proc.stdin.write(line)
@@ -3676,10 +3682,16 @@ def engine_args(cfg: dict, exe: str | None = None, *, announce: bool = True) -> 
             args.append("--ssd-experts")
         if cfg.get("drafting") == ryzen_policy.DRAFTER:
             data = drafting.data_dir_of(args)
-            vocab = drafting.vocab_path(args, data)
+            saved_vocab_args = [*(cfg.get("user_args") or []), *args]
+            vocab = drafting.vocab_path(saved_vocab_args, data)
             if data is None or vocab is None or not drafting.stock_q4_ok(data):
                 raise ValueError("The verified DFlash2 Q4_0 pack or vocabulary is missing. Run setup again or choose drafting off.")
             flags = list(drafting.engine_flags(drafting.target_path(data), vocab))
+            fixed_vocab = cfg.get("draft_vocab") or "--mtp-draft-vocab" in saved_vocab_args
+            if not fixed_vocab and exe and engine_has_text(exe, b"--draft-vocab-dir"):
+                profiles = drafting.request_vocab_paths(vocab)
+                if len(profiles) == 5:
+                    flags.extend(["--draft-vocab-dir", str(profiles["en"].parent)])
             flags[flags.index("--spec") + 1] = str(ryzen_policy.DFLASH_WINDOW)
             flags[flags.index("--draft-conf") + 1] = str(ryzen_policy.DFLASH_CONFIDENCE)
             args = user_args.merge(drafting.strip_draft_flags(args), flags)
@@ -5571,6 +5583,8 @@ class Service:
                         part.update(type="text", text=f"[image omitted: {why}]")
                     else:
                         part["source"] = str(image)
+        if cancel is not None and getattr(self.engine, "request_vocab", False):
+            cancel._strata_draft_lang = detect_language(messages)
         fetched = self._note_unreadable_tool_images(messages, cancel)
         ids = encoded_ids = self.encode_prompt(messages, tools, kwargs)
         if force and (kwargs.get("enable_thinking", True) is False or self.inkling):   # Inkling: the call opens the reply (no thinking pass to wait for)

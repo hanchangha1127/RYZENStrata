@@ -25,10 +25,10 @@ ROOT = Path(__file__).resolve().parents[1]
 TERMINAL = ROOT / "terminal"
 WINDOWS = sys.platform == "win32"
 MODEL = "qwen3.8-flash-next-q2_0"
-_WINDOWS_ENGINE_TAG = "ryzen-v0.1.0"
+_WINDOWS_ENGINE_TAG = "ryzen-v0.2.0"
 _WINDOWS_ENGINE_ASSET = "strata-windows-x64-hip.zip"
-_WINDOWS_ENGINE_SHA256 = "ab4f15b8ce99aef81d535d75a93278c9be0466bcfcd7adbae76f9fb3e26b7572"
-_WINDOWS_ENGINE_BYTES = 139735661
+_WINDOWS_ENGINE_SHA256 = "4390ab1930b45011dc98717956729c7c80b4e6df3564963c6cb3bf178466da32"
+_WINDOWS_ENGINE_BYTES = 140223501
 _WINDOWS_ENGINE_URL = f"https://github.com/hanchangha1127/RYZENStrata/releases/download/{_WINDOWS_ENGINE_TAG}/{_WINDOWS_ENGINE_ASSET}"
 _WINDOWS_ENGINE_DEFAULT = ROOT / "dist" / "strata-windows-x64-hip"
 _WINDOWS_ENGINE_REQUIRED = frozenset({

@@ -17,6 +17,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <filesystem>
+#include <fstream>
 #include <atomic>
 #include <initializer_list>
 #include <stdexcept>
@@ -476,6 +478,71 @@ bool Dflash2Drafter::bind(const WeightTable& wt, const NativeHead* head, const s
     return true;
 }
 
+bool Dflash2Drafter::switch_vocab(const NativeHead& head, const std::string& vocab_file, std::string& err) {
+    const size_t row_bytes = head.row_bytes();
+    if (!bound_ || !dhead_ || !dvocab_ || dhead_shared_ || blob_shared_ || head.is_split() ||
+        device_ != head.device() || !row_bytes) {
+        err = "language-specific drafting requires an owned draft head on the target GPU";
+        return false;
+    }
+    const size_t rows = head.weight_bytes() / row_bytes;
+    std::ifstream file(std::filesystem::u8path(vocab_file), std::ios::binary | std::ios::ate);
+    const std::streamoff bytes = file.tellg();
+    if (bytes < (std::streamoff)(kernels::kDf2TopK * sizeof(int32_t)) || bytes % sizeof(int32_t) ||
+        (uint64_t)bytes / sizeof(int32_t) > std::min(rows, (size_t)kernels::kDf2TopBlocks * 4096)) {
+        err = "missing or invalid draft vocabulary: " + vocab_file;
+        return false;
+    }
+    const size_t count = (size_t)bytes / sizeof(int32_t);
+    std::vector<int32_t> ids(count);
+    std::vector<bool> seen(rows);
+    if (!file.seekg(0).read(reinterpret_cast<char*>(ids.data()), bytes)) {
+        err = "could not read draft vocabulary: " + vocab_file;
+        return false;
+    }
+    for (int32_t id : ids) {
+        if (id < 0 || (size_t)id >= rows || seen[(size_t)id]) {
+            err = "invalid or duplicate token in draft vocabulary: " + vocab_file;
+            return false;
+        }
+        seen[(size_t)id] = true;
+    }
+    // Stage the replacement first. A failed switch leaves the already-bound head and its graphs usable.
+    const OnDevice on_device(device_);
+    if (!context_wait(err)) return false;
+    int32_t* new_ids = nullptr;
+    uint8_t* new_head = nullptr;
+    float* new_logits = nullptr;
+    auto status = cudaMalloc((void**)&new_ids, count * sizeof(int32_t));
+    if (status == cudaSuccess) status = cudaMalloc((void**)&new_head, count * row_bytes);
+    if (status == cudaSuccess) status = cudaMalloc((void**)&new_logits, count * kDrafts * sizeof(float));
+    if (status == cudaSuccess) status = cudaMemcpy(new_ids, ids.data(), count * sizeof(int32_t), cudaMemcpyHostToDevice);
+    if (status == cudaSuccess) {
+        kernels::gather_rows(static_cast<const uint8_t*>(head.weights()), (int64_t)row_bytes, new_ids, (int64_t)count, new_head, cs_);
+        status = cudaGetLastError();
+        if (status == cudaSuccess) status = cudaStreamSynchronize(cs_);
+    }
+    if (status != cudaSuccess) {
+        if (new_head) cudaFree(new_head);
+        if (new_ids) cudaFree(new_ids);
+        if (new_logits) cudaFree(new_logits);
+        err = std::string("could not switch draft vocabulary: ") + cudaGetErrorString(status);
+        return false;
+    }
+    discard_graphs();
+    cudaFree(dhead_);
+    cudaFree(dvocab_);
+    cudaFree(logits_);
+    dhead_ = new_head;
+    head_w_ = new_head;
+    dvocab_ = new_ids;
+    logits_ = new_logits;
+    const size_t bytes_per_token = row_bytes + sizeof(int32_t) + kDrafts * sizeof(float);
+    vram_ = vram_ - (uint64_t)n_dvocab_ * bytes_per_token + count * bytes_per_token;
+    n_dvocab_ = (int64_t)count;
+    return true;
+}
+
 #endif  // STRATA_DF2_NO_BIND
 void Dflash2Drafter::gemm(std::initializer_list<const char*> names, std::initializer_list<float*> outs, int ncols, cudaStream_t cs, const uint8_t* xq, const float* xd) {
     kernels::Df2Mat mats[3];
@@ -738,14 +805,18 @@ bool Dflash2Drafter::catch_up(int64_t upto, std::string& err) {
     return true;
 }
 
+void Dflash2Drafter::discard_graphs() {
+    for (auto& e : exec_)
+        if (e) { cudaGraphExecDestroy(e); e = nullptr; }
+    graph_taps_ = nullptr;
+}
+
 void Dflash2Drafter::set_max_drafts(int n) {
     n = std::max(1, std::min(n, (int) kDrafts));
     if (n == ndraft_) return;
     const OnDevice on_device(device_);
     cudaDeviceSynchronize();
-    for (auto& e : exec_)
-        if (e) { cudaGraphExecDestroy(e); e = nullptr; }
-    graph_taps_ = nullptr;
+    discard_graphs();
     ndraft_ = n;
 }
 

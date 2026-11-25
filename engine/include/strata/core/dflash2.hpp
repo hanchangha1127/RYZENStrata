@@ -53,6 +53,8 @@ public:
     /// `head_device` >= 0 and not this card's: the head sits on another card (a layer split's last stage); the draft vocabulary's rows are gathered there and
     /// copied over once, so the drafter can sit on the first stage's card.
     bool bind(const WeightTable& wt, const NativeHead* head, const std::string& vocab_file, std::string& err, int head_device = -1);
+    /// Between solo requests, gather another token subset from the resident target head. Keeps the draft K/V ring.
+    bool switch_vocab(const NativeHead& head, const std::string& vocab_file, std::string& err);
     /// STRATA_DF2_HEAD=native (CUDA / HIP): bind() ignores the vocabulary file and runs the draft head on the target's whole head (no pruned copy).
     static bool head_native() { const char* e = std::getenv("STRATA_DF2_HEAD"); return e != nullptr && e[0] == 'n'; }
     /// DF-05: before bind, the MTP drafter's gathered draft-head rows and vocabulary (device pointers it keeps owning) when they are the same bytes this
@@ -175,6 +177,7 @@ private:
     bool record_context(const float* taps, int n, cudaStream_t cs, std::string& err, bool rope = true);
     bool record_block(cudaStream_t cs, std::string& err, bool rope = true);
     bool capture(int n, const float* taps, std::string& err);
+    void discard_graphs();
     bool alloc(std::string& err);
     struct Prof;
     Prof* prof_ = nullptr;

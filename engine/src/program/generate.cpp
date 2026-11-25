@@ -1189,6 +1189,7 @@ struct Options {
     std::string mtp_q4;   ///< "" (off), all, proj (the projections only) or head (the draft head only)
     /// --mtp-draft-vocab FILE (opt-in): the draft head's token subset from FILE instead of <mtp>/draft_vocab.bin
     std::string mtp_draft_vocab;
+    std::string draft_vocab_dir;   ///< local directory of per-language DFlash2 vocabulary files
     /// --draft dflash2 --draft-model PACK (opt-in, CUDA / HIP): the DFlash2 block drafter for Qwen3.8-Flash-Next (tools/dflash2_pack.py) drafts instead
     /// of the MTP layer, which is not loaded (--draft-fallback mtp loads it too, as the fallback).  Needs --mtp DIR (its draft_vocab.bin), --spec, --draft-model and a native pack; DFlash2 that cannot start is an error unless the fallback is mtp.
     std::string draft, draft_model;
@@ -1215,7 +1216,8 @@ struct Options {
 
 void usage() {
 #if defined(STRATA_RYZEN_PROFILE)
-    std::fprintf(stderr, "  --gpu-experts-only   run the RYZENStrata HIP profile v2 (enabled by default)\n");
+    std::fprintf(stderr, "  --gpu-experts-only   run the RYZENStrata HIP profile v3 (enabled by default)\n");
+    std::fprintf(stderr, "  --draft-vocab-dir DIR  enable per-request DFlash2 language vocabularies in --serve\n");
 #endif
     std::fprintf(stderr,
                  "strata generate --pack DIR --tokens \"1,2,3\" [options]\n"
@@ -4179,6 +4181,9 @@ int main(int argc, char** argv) {
             }
         }
         else if (a == "--mtp-draft-vocab") o.mtp_draft_vocab = next("--mtp-draft-vocab");
+#if defined(STRATA_RYZEN_PROFILE) && defined(STRATA_HAVE_DFLASH2)
+        else if (a == "--draft-vocab-dir") o.draft_vocab_dir = next("--draft-vocab-dir");
+#endif
         else if (a == "--draft") {
             o.draft = next("--draft");
             if (o.draft == "auto") { o.draft = "dflash2"; o.draft_auto = true; }
@@ -16535,7 +16540,12 @@ int main(int argc, char** argv) {
             }
         }
         g_gpu_pause_idle.idle(gpu_pause_now());   // AMD on Linux: the gap before the first request starts here (the start-up's own pauses are not a "between")
-        std::printf("READY %lld stop hold holdb\n", (long long) o.max_context);   // "stop": this engine honours STOP; "hold": GEN hold=N:ID; "holdb": the --batch slots end at the hold too (BDONE hold)
+        bool language_vocab = false;
+#if defined(STRATA_RYZEN_PROFILE) && defined(STRATA_HAVE_DFLASH2)
+        language_vocab = use_df2 && df2_solo && !o.draft_vocab_dir.empty() && !df2.head_native();
+        std::string active_draft_lang;   // empty selects the original --mtp-draft-vocab subset
+#endif
+        std::printf("READY %lld stop hold holdb%s\n", (long long) o.max_context, language_vocab ? " draft_lang=1" : "");
         std::fflush(stdout);
         std::string line;
         int64_t rounds = 0;
@@ -19001,6 +19011,7 @@ int main(int argc, char** argv) {
             // the missed experts and the draft-probability floor, for this request only
             double req_pcie_frac = o.pcie_frac, req_spec_min_p = o.spec_min_p;
             std::string req_draft;   // draft=mtp|dflash2 (--draft auto): which drafter this request uses
+            std::string req_draft_lang;
             bool req_min_p_set = false;
             double req_pipe = -1.0;   // --prefill-pipe for this request (setup's calibration of a layer split)
             int req_aux_cpus = -1;   // aux_cpus=0|1: --aux-cpus for this request (-1 = the start-up value)
@@ -19063,6 +19074,7 @@ int main(int argc, char** argv) {
                     else if (key == "pcie_frac") { req_pcie_frac = std::clamp((double) fv, 0.0, 1.0); req_pcie_set = true; }
                     else if (key == "spec_min_p") { req_spec_min_p = std::clamp((double) fv, 0.0, 1.0); req_min_p_set = true; }
                     else if (key == "draft") req_draft = tok.substr(eq + 1);
+                    else if (key == "draft_lang") req_draft_lang = tok.substr(eq + 1);
                     else if (key == "pipe") req_pipe = std::max(0.0, (double) fv);
                     else if (key == "aux_cpus") req_aux_cpus = std::atoi(tok.c_str() + eq + 1) != 0 ? 1 : 0;
                     else if (key == "slot_read") req_slot_read = std::atoi(tok.c_str() + eq + 1) != 0;
@@ -19124,6 +19136,25 @@ int main(int argc, char** argv) {
                 continue;
             }
             const int64_t n = (int64_t) ids.size();
+#if defined(STRATA_RYZEN_PROFILE) && defined(STRATA_HAVE_DFLASH2)
+            if (req_draft_lang != active_draft_lang) {
+                if (!language_vocab || (!req_draft_lang.empty() && req_draft_lang != "en" && req_draft_lang != "ko" &&
+                    req_draft_lang != "ja" && req_draft_lang != "zh" && req_draft_lang != "fr")) {
+                    std::printf("ERR unsupported DFlash2 draft language\n");
+                    continue;
+                }
+                const auto path = req_draft_lang.empty() ? df2_vocab_path() :
+                    o.draft_vocab_dir + "/draft_vocab_" + req_draft_lang + ".bin";
+                std::string why;
+                if (!df2.switch_vocab(native_head, path, why)) {
+                    std::printf("ERR draft vocabulary: %s\n", why.c_str());
+                    continue;
+                }
+                active_draft_lang = req_draft_lang;
+                std::fprintf(stderr, "strata dflash2: draft language %s, %lld tokens\n",
+                             active_draft_lang.empty() ? "default" : active_draft_lang.c_str(), (long long)df2.n_draft_vocab());
+            }
+#endif
             // --draft auto: this request's drafter.  Without the DFlash2 drafter loaded every request uses the MTP, as before.
             uint64_t bandit_key = 0;
             if (use_df2 && o.draft_auto) {
