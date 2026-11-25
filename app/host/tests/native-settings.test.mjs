@@ -2,6 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {validateNativeSettings,validateMcpServers,publicMcpServers,publicNativeEnv,restoreNativeEnv} from '../server/native-settings.mjs';
 import {validateChatImages} from '../server/chat-images.mjs';
+test('Ryzen accepts the five explicit request counts',()=>{
+ for(const parallel of [1,2,4,8,16])assert.deepEqual(validateNativeSettings({parallel},true),{parallel});
+ for(const parallel of [0,3,9,32])assert.throws(()=>validateNativeSettings({parallel},true),/Concurrent requests/);
+ assert.throws(()=>validateNativeSettings({parallel:16}));
+});
 test('native settings reject invalid ranges and unmanaged network arguments',()=>{
  assert.deepEqual(validateNativeSettings({parallel:2,layer_split:'16,32',reasoning_budget_tokens:null,sampling:{temperature:.7}}),{parallel:2,layer_split:'16,32',reasoning_budget_tokens:null,sampling:{temperature:.7}});
  for(const value of [{parallel:0},{parallel:1.2},{layer_split:'32,16'},{layer_split:'48'},{exe:'/tmp/program'},{args:['--host','0.0.0.0']},{env:{HOME:'/tmp'}},{sampling:{top_p:2}},{anthropic_thinking:'always'}])assert.throws(()=>validateNativeSettings(value));

@@ -56,7 +56,7 @@ Dflash2Drafter::~Dflash2Drafter() {
     for (int l = 0; l < 8; ++l) { fr(kring_[l]); fr(vring_[l]); }
     fr(fcy_); fr(hctx_); fr(kc_); fr(vc_); fr(h_); fr(xn_); fr(xc_); fr(dyn_); fr(q_); fr(qn_); fr(k_); fr(v_); fr(kblk_); fr(ao_); fr(o_);
     fr(gate_); fr(up_); fr(mlp_); fr(part_); fr(fn_); fr(logits_); fr(topval_); fr(hsel_); fr(toptok_); fr(topscratch_);
-    if (!dhead_shared_ && !blob_shared_) { fr(dvocab_); fr(dhead_); }
+    if (!dhead_shared_) { fr(dvocab_); fr(dhead_); }
     if (h_meta_) cudaFreeHost(h_meta_);
     if (h_out_) cudaFreeHost(h_out_);
     if (cs_) cudaStreamDestroy(cs_);
@@ -480,7 +480,7 @@ bool Dflash2Drafter::bind(const WeightTable& wt, const NativeHead* head, const s
 
 bool Dflash2Drafter::switch_vocab(const NativeHead& head, const std::string& vocab_file, std::string& err) {
     const size_t row_bytes = head.row_bytes();
-    if (!bound_ || !dhead_ || !dvocab_ || dhead_shared_ || blob_shared_ || head.is_split() ||
+    if (!bound_ || !dhead_ || !dvocab_ || (dhead_shared_ && !blob_shared_) || head.is_split() ||
         device_ != head.device() || !row_bytes) {
         err = "language-specific drafting requires an owned draft head on the target GPU";
         return false;
@@ -530,15 +530,19 @@ bool Dflash2Drafter::switch_vocab(const NativeHead& head, const std::string& voc
         return false;
     }
     discard_graphs();
-    cudaFree(dhead_);
-    cudaFree(dvocab_);
+    const size_t old_row_bytes = dhead_shared_ ? 0 : row_bytes + sizeof(int32_t);
+    if (!dhead_shared_) {
+        cudaFree(dhead_);
+        cudaFree(dvocab_);
+    }
     cudaFree(logits_);
+    dhead_shared_ = false;
     dhead_ = new_head;
     head_w_ = new_head;
     dvocab_ = new_ids;
     logits_ = new_logits;
     const size_t bytes_per_token = row_bytes + sizeof(int32_t) + kDrafts * sizeof(float);
-    vram_ = vram_ - (uint64_t)n_dvocab_ * bytes_per_token + count * bytes_per_token;
+    vram_ = vram_ - (uint64_t)n_dvocab_ * (old_row_bytes + kDrafts * sizeof(float)) + count * bytes_per_token;
     n_dvocab_ = (int64_t)count;
     return true;
 }

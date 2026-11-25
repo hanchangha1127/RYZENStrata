@@ -8558,7 +8558,8 @@ def _start(cfg_path: Path, port: int | None, gpu: int | list | None = None, open
     """keep: settings given on this start that the model keeps from now on (--host, --api-key, --draft-vocab,
     --vram-reserve-mib)."""
     cfg = json.loads(cfg_path.read_text(encoding="utf-8-sig"))
-    issue = ryzen_policy.runtime_problem(cfg) or ryzen_policy.host_hardware_problem(gpu if gpu is not None else cfg.get("gpu"))
+    keep = {k: v for k, v in (keep or {}).items() if v is not None}
+    issue = ryzen_policy.runtime_problem({**cfg, **keep}) or ryzen_policy.host_hardware_problem(gpu if gpu is not None else cfg.get("gpu"))
     if issue:
         fail(issue)
     component = engine_component.is_reference(cfg["exe"])
@@ -8567,7 +8568,6 @@ def _start(cfg_path: Path, port: int | None, gpu: int | list | None = None, open
     missing = [p for p in files if not Path(p).exists()]
     if missing:
         fail(f"{cfg_path.name} refers to missing files: {missing[0]}", "run it again with --setup to repair")
-    keep = {k: v for k, v in (keep or {}).items() if v is not None}
     reserve = keep.pop("vram_reserve_mib", None)       # #493: an engine argument, kept in the config's args
     if reserve is not None:
         args = cfg["args"]
@@ -11544,9 +11544,9 @@ def main() -> int:
                     help="which drafter this model will use. dflash2: the MTP draft layer's ~5 GB are not downloaded (the DFlash2 drafter is fetched by `strata drafting fetch`); "
                          "the arguments keep the --mtp folder so a later switch to the MTP works. mtp (the default): the draft layer is fetched as before. Nothing is written about it "
                          "in the run config: the choice is its \"drafting\" key")
-    ap.add_argument("--parallel", type=int, metavar="N",
-                    help="up to N requests decode together (batch slots, opt-in; default: one at a time, the others "
-                         "wait). Each slot takes VRAM from the expert cache; setup says what it recommends")
+    ap.add_argument("--parallel", type=int, choices=ryzen_policy.PARALLEL_CHOICES,
+                    help="concurrent requests on this GPU (default 1). Multiple slots require DFlash2 and "
+                         "GPU memory for each slot's context.")
     ap.add_argument("--replicas", type=int, metavar="N",
                     help="several GPUs: run N independent engines, each on its own equal group of the chosen cards (2 "
                          "replicas on 4 cards = two 2-card engines), requests spread over them (opt-in; more total "
@@ -11566,8 +11566,10 @@ def main() -> int:
         ap.error("Get updates by pulling this fork and rebuilding its Ryzen HIP engine.")
     if a.context is not None and not 0 < a.context <= ryzen_policy.DEFAULT_CONTEXT:
         ap.error("Context must be at most 256K tokens.")
-    if a.mtp == "on" or a.images not in (None, "no") or a.parallel not in (None, 1):
-        ap.error("This edition serves text with DFlash2 or drafting off, one request at a time.")
+    if a.mtp == "on" or a.images not in (None, "no"):
+        ap.error("This edition serves text with DFlash2 or drafting off.")
+    if issue := ryzen_policy.parallel_problem(a.parallel, a.drafter):
+        ap.error(issue)
     if a.gpus or a.gpu_roles or a.layer_split or a.replicas or (a.gpu and "," in a.gpu):
         ap.error("This edition runs on one gfx1151 GPU.")
     if a.prebuilt and "://" in a.prebuilt:
@@ -11726,13 +11728,13 @@ def main() -> int:
             warn("this PC is NOT tuned: the tuning failed (the reason is above); the model "
                  + ("keeps" if a.no_start else "starts with") + " the default settings")
         return 0 if a.no_start else start(pick_cfg, a.port, run_gpu, yes=a.yes, layer_split=a.layer_split,
-                     keep={"host": a.host, "api_key": a.api_key, "draft_vocab": a.draft_vocab,
+                     keep={"host": a.host, "api_key": a.api_key, "draft_vocab": a.draft_vocab, "parallel": a.parallel,
                            "vram_reserve_mib": a.vram_reserve_mib, "open_browser": a.browser})
     if have and not (a.setup or a.model or a.family or a.check or a.no_start):
         engine_update_note()
         if len(have) == 1:
             return start(have[0], a.port, run_gpu, yes=a.yes, layer_split=a.layer_split,
-                     keep={"host": a.host, "api_key": a.api_key, "draft_vocab": a.draft_vocab,
+                     keep={"host": a.host, "api_key": a.api_key, "draft_vocab": a.draft_vocab, "parallel": a.parallel,
                            "vram_reserve_mib": a.vram_reserve_mib, "open_browser": a.browser})
         say()
         for i, c in enumerate(have, 1):
@@ -11741,7 +11743,7 @@ def main() -> int:
         pick = int(ask("Which one?", [str(i) for i in range(1, len(have) + 2)], "1", a.yes))
         if pick <= len(have):
             return start(have[pick - 1], a.port, run_gpu, yes=a.yes, layer_split=a.layer_split,
-                     keep={"host": a.host, "api_key": a.api_key, "draft_vocab": a.draft_vocab,
+                     keep={"host": a.host, "api_key": a.api_key, "draft_vocab": a.draft_vocab, "parallel": a.parallel,
                            "vram_reserve_mib": a.vram_reserve_mib, "open_browser": a.browser})
         data, elsewhere = data_folder_for(a)      # "install another model": now the model files are gathered
         roots = [data, *elsewhere]
@@ -11752,7 +11754,7 @@ def main() -> int:
     step(1, "checking your PC")
     a.family, a.model = ryzen_policy.FAMILY, ryzen_policy.MODEL
     a.context = a.context if a.context and a.context <= ryzen_policy.DEFAULT_CONTEXT else ryzen_policy.DEFAULT_CONTEXT
-    a.kv, a.vision, a.parallel = ryzen_policy.KV, "no", 1
+    a.kv, a.vision, a.parallel = ryzen_policy.KV, "no", a.parallel or 1
     a.backend, a.low_ram, a.kv_streaming = "hip", "off", "off"
     a.experimental_speed_projection = "off"
     a.drafter = a.drafter or ryzen_policy.DRAFTER
@@ -12447,7 +12449,7 @@ def main() -> int:
     cfg["exe"] = str(eng / EXE)
     cfg["gpu"] = gpu["index"]
     write_setup_config(cfg_path, cfg, adopted if adopted is not None and adopted.name == cfg_path.name else None, explicit_args(a),
-                       after_carry=lambda c: ryzen_policy.apply_runtime(c, ctx, a.drafter))
+                       after_carry=lambda c: ryzen_policy.apply_runtime(c, ctx, a.drafter, a.parallel))
     script = write_run_script(tag, cfg_path, port, cfg.get("open_browser") is not False)
     # offered only when someone answers: --yes installs and adopted earlier installs are not held up by it
     # P12: Skip is the default, as in the Terminal's first launch (T5): a person who presses Enter all the way does not wait 15-30 minutes

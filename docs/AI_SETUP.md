@@ -6,7 +6,7 @@ Use a Ryzen AI Max+ 395 or 495 system with 64 GiB or more installed. A 48 GiB or
 
 Clone `hanchangha1127/RYZENStrata` and run the command for your system from the repository root:
 
-- Windows x64 uses `py -3 tools/agent_setup.py`. Install the AMD graphics driver and Python 3.10 or later. Setup reuses a compatible fork build or downloads the pinned Windows HIP engine with per-request DFlash2 vocabularies. The release path requires no compiler. [RYZENStrata release](https://github.com/hanchangha1127/RYZENStrata/releases/tag/ryzen-v0.2.0)
+- Windows x64 uses `py -3 tools/agent_setup.py`. Install the AMD graphics driver and Python 3.10 or later. Setup reuses a compatible fork build or downloads the pinned Windows HIP engine with per-request DFlash2 vocabularies. The release path requires no compiler. [RYZENStrata release](https://github.com/hanchangha1127/RYZENStrata/releases/tag/ryzen-v0.3.0)
 - Native x86-64 Linux uses `python3 tools/agent_setup.py`. Install Python 3.10 or later with `venv` support. The system needs the AMD `amdgpu` driver and permission to use the GPU. The upstream [Strix Halo guide](STRIX_HALO.md#1-the-toolchain-no-root-needed) documents the compiler and driver setup.
 
 The Windows ZIP contains the executables and packaged ROCm runtime at the archive root and under `rocm/`. Setup resumes interrupted downloads, verifies the ZIP against the SHA-256 in the checkout, and caches the verified engine under `dist/windows-engine/`. The same directory is used for model preparation, launch, and later starts.
@@ -20,3 +20,15 @@ Append `--plan` to check the machine, available engine, expected downloads, and 
 The launch defaults to 262,144 context tokens and Q8 KV. The engine uses direct reads for the N-gram table. A smaller context can be selected if the driver cannot allocate enough memory. On Windows, Windows-visible usable system memory excludes the dedicated GPU allocation, so check the amount installed for the 64 GiB threshold.
 
 The [technical reference](AI_REFERENCE.md) lists the expected runtime settings and API endpoints.
+
+## Set the number of concurrent requests
+
+The default is one request. With DFlash2 enabled, choose `--parallel 2`, `4`, `8` or `16` at startup. Each slot gets the requested context length. The GPU shares the model weights and needs additional memory for each slot's KV cache, verification state and drafter buffers. Parallel mode keeps each active conversation's state on the GPU and disables optional host snapshots of earlier prompts. If the requested slots and all routed experts cannot fit, choose fewer slots or a shorter context.
+
+For example, the following command starts two requests with an 8,192-token context per request on Windows:
+
+```powershell
+py -3 tools/agent_setup.py --parallel 2 --context 8192
+```
+
+For a prepared installation, use `python terminal/strata.py launch --parallel 2 --context 8k` with the installation's usual data directory and engine. In the desktop app, set **Concurrent requests** in the model settings, then reload the model. Start with `--parallel 1` to return to single-request serving.

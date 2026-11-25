@@ -526,9 +526,12 @@ def config_for(inp: SetupInputs, lib) -> SetupConfig:
     if a.parallel is not None:
         if a.parallel >= 2:
             cfg["parallel"] = a.parallel
-            for i, line in enumerate(parallel_note(a.parallel, [g.get("vram_gb", 0.0) for g in chosen],
-                                                   MODELS[model]["arena_gb"], ctx, kv, streaming, ram)):
-                (ok if i == 0 else warn)(line)
+            if family == "qwen" and model == "Q2_0" and hip:
+                ok(f"parallel requests: {a.parallel} GPU slots, each with a {ctx}-token context")
+            else:
+                for i, line in enumerate(parallel_note(a.parallel, [g.get("vram_gb", 0.0) for g in chosen],
+                                                       MODELS[model]["arena_gb"], ctx, kv, streaming, ram)):
+                    (ok if i == 0 else warn)(line)
         else:
             cfg["parallel"] = 1
             ok("parallel requests: one at a time (--parallel 1)")

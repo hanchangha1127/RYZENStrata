@@ -20,9 +20,10 @@ DFLASH_CONFIDENCE = 0.35
 MIN_RAM_GIB = 64
 RECOMMENDED_VRAM_GIB = 48
 GPU_ONLY_FLAG = "--gpu-experts-only"
+PARALLEL_CHOICES = (1, 2, 4, 8, 16)
 MODEL_ERROR = f"This edition supports only {TITLE}."
 GPU_ERROR = "This edition requires the integrated AMD Radeon gfx1151 GPU."
-ENGINE_PROFILE = "RYZENStrata HIP profile v3"
+ENGINE_PROFILE = "RYZENStrata HIP profile v4"
 ENGINE_ERROR = f"This edition requires {ENGINE_PROFILE}. Run the setup from this checkout to update the engine."
 CPU_NAME = re.compile(r"\bAMD Ryzen AI Max\+\s+(?:PRO\s+)?(?:395|495)\b", re.IGNORECASE)
 
@@ -87,6 +88,14 @@ def host_hardware_problem(gpu: int | None = None) -> str | None:
     return hardware_problem({"cpu": {"name": cpu}, "gpus": cards, "ram_gb": visible}, gpu)
 
 
+def parallel_problem(slots: object, drafting: str | None = None) -> str | None:
+    if slots is not None and (type(slots) is not int or slots not in PARALLEL_CHOICES):
+        return "Choose 1, 2, 4, 8 or 16 parallel requests."
+    if slots and slots > 1 and drafting == "off":
+        return "Parallel Ryzen request slots require DFlash2. Enable DFlash2 or choose one request."
+    return None
+
+
 def launch_problem(s) -> str | None:
     if (s.family is not None or s.model is not None) and not model_matches(s.family or FAMILY, s.model or MODEL):
         return MODEL_ERROR
@@ -100,15 +109,13 @@ def launch_problem(s) -> str | None:
         return "This edition supports DFlash2 Q4_0 drafting or drafting off."
     if (s.gpus and len(s.gpus) > 1) or s.gpu_roles or s.split_engine == "on":
         return "This edition runs on one gfx1151 GPU."
-    if s.parallel not in (None, 1):
-        return "This edition serves one request at a time."
-    return None
+    return parallel_problem(s.parallel, s.drafting)
 
 
 def set_launch_defaults(s) -> None:
     s.family, s.model = FAMILY, MODEL
     s.context = s.context or DEFAULT_CONTEXT
-    s.kv, s.vision, s.parallel = KV, "off", 1
+    s.kv, s.vision, s.parallel = KV, "off", s.parallel if s.parallel is not None else 1
     s.drafting = "off" if s.drafting == "off" else DRAFTER
     s.mtp, s.split_engine, s.tune = None, "off", "skip"
 
@@ -147,17 +154,19 @@ def runtime_problem(cfg: dict) -> str | None:
         return "This edition supports DFlash2 Q4_0 drafting or drafting off. Run setup again."
     if (isinstance(cfg.get("gpu"), list) or cfg.get("split_engine") or cfg.get("split_serve")
             or cfg.get("split_fallback") or cfg.get("replicas") or cfg.get("gpu_roles")
-            or cfg.get("gpu_none") or cfg.get("parallel", 1) not in (None, 1) or "--cpu" in args):
-        return "This edition serves one request on one gfx1151 GPU."
-    return None
+            or cfg.get("gpu_none") or "--cpu" in args):
+        return "This edition serves requests on one gfx1151 GPU."
+    if any(flag in args for flag in ("--batch", "--slots", "--batch-groups")):
+        return "Set parallel in the Ryzen configuration to choose the number of request slots."
+    return parallel_problem(cfg.get("parallel"), cfg.get("drafting") or "off")
 
 
-def apply_runtime(cfg: dict, context: int, drafting: str) -> None:
+def apply_runtime(cfg: dict, context: int, drafting: str, parallel: int = 1) -> None:
     """Write the runtime settings after setup has carried over the previous config."""
     from strata_control import draft_layer, user_args
 
     blocked = {"--kv", "--ple-io", "--max-context", "--kv-resident", "--mtp", "--mmap-experts",
-               "--batch", "--batch-groups", "--vision", "--prefill", "--spec",
+               "--batch", "--slots", "--batch-groups", "--batch-mtp", "--vision", "--prefill", "--spec",
                "--resident-budget-gib", "--resident-experts", "--resident-cpu-experts",
                "--cpu", "--native-flash-attn-short", "--draft", "--draft-fallback", "--draft-model"}
     for key in ("args", user_args.USER_KEY):
@@ -165,7 +174,7 @@ def apply_runtime(cfg: dict, context: int, drafting: str) -> None:
         cfg[key] = user_args.flat([g for g in groups if g[0].partition("=")[0] not in blocked | {GPU_ONLY_FLAG}])
     cfg["args"] += [GPU_ONLY_FLAG, "--max-context", str(context), "--kv", KV, "--ple-io", "direct",
                     "--mmap-experts", "--prefill", "auto", "--spec", str(DFLASH_WINDOW if drafting == DRAFTER else 4)]
-    cfg.update(backend="hip", parallel=1, mtp=False, drafting=drafting, ryzen_profile=True)
+    cfg.update(backend="hip", parallel=parallel, mtp=False, drafting=drafting, ryzen_profile=True)
     for key in ("vision", "images", "split_engine", "split_serve", "split_fallback", "replicas", "gpu_roles", "gpu_none"):
         cfg.pop(key, None)
     draft_layer.apply(cfg)

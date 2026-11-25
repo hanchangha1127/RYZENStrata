@@ -23,6 +23,7 @@ Append `--plan` to check the hardware, SSD, and planned downloads without instal
 | Installed memory | At least 64 GiB of shared system memory |
 | Graphics memory | At least 48 GiB recommended |
 | Context window | 262,144 tokens by default |
+| Concurrent requests | 1 by default. Select 1, 2, 4, 8 or 16 with `--parallel`. Multiple slots require DFlash2 and enough GPU memory for each slot's context. |
 | K and V cache | Q8 by default |
 | Attention | Fused GPU attention on the native QSA path |
 | Draft model | DFlash2 Q4_0 |
@@ -32,7 +33,7 @@ Append `--plan` to check the hardware, SSD, and planned downloads without instal
 
 The model publisher lists 37.6 GB of transformer weights and a 28.8 GB N-gram table. Keep the model on an SSD. The context window, drafter, engine scratch buffers, and operating system need additional memory. The CPU and GPU share one memory pool, so count that memory once. Actual maximum context depends on how much memory the engine and driver can allocate. [Model files and memory requirements](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF#memory-requirements)
 
-The Windows release and the measured before-and-after results are available here. [Windows HIP engine](https://github.com/hanchangha1127/RYZENStrata/releases/tag/ryzen-v0.2.0) · [Ryzen AI Max+ 395 benchmark](docs/bench-results/2026-11-24-ryzen395-q2/README.md)
+The Windows release and the measured before-and-after results are available here. [Windows HIP engine](https://github.com/hanchangha1127/RYZENStrata/releases/tag/ryzen-v0.3.0) · [Ryzen AI Max+ 395 benchmark](docs/bench-results/2026-11-24-ryzen395-q2/README.md)
 
 ## Run from source
 

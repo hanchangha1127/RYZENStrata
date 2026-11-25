@@ -20,6 +20,7 @@ from textual.screen import ModalScreen, Screen
 from textual.widgets import Input, Static
 
 from strata_cli.launch import access as acc
+from strata_control import ryzen_policy
 from strata_cli.launch import params as P
 from strata_cli.launch import settings as S
 from strata_cli.launch import store
@@ -296,7 +297,7 @@ class StartScreen(Base):
             sm = store.summary(p)
             is_hy4 = p.family == "hy4-flash"
             is_native_strata = p.family in ("hy4-flash", "inkling-2-mini")
-            req = "1 request" if is_hy4 else ((f"{p.parallel} request" + ("s" if p.parallel != 1 else "")) if p.parallel else "fit to card")
+            req = S.preset_parallel_label(p)
             tuned = "built-in" if is_native_strata else (f"tuned {p.tuned_at[5:]}" if p.is_tuned and p.tuned_at else "not tuned")
             used = f"last used {p.last_used[5:10]}" if p.last_used else "not used yet"
             cells = [p.name or "?", str(sm["model"]), S.context_label(p.context), req, Cell(tuned, MUTE if (not p.is_tuned and not is_native_strata) else ""), Cell(used, MUTE)]
@@ -1281,6 +1282,14 @@ class ParallelScreen(Base):
         vram = self.ctx.computer.main_vram_gb
         s = self.ctx.settings
         is_inkling = s.family == "inkling-2-mini"
+        if ryzen_policy.model_matches(s.family, s.model):
+            choices = ryzen_policy.PARALLEL_CHOICES
+            items = [Item([f"{n} request" if n == 1 else f"{n} requests", Cell("default" if n == 1 else "", "")], key=n)
+                     for n in choices]
+            self.query_one(Menu).columns = [("", 36), ("", 0)]
+            self.query_one(Menu).set_items(items, choices.index(s.parallel) if s.parallel in choices else 0)
+            self.paint()
+            return
         if is_inkling:
             self.fit = 8 if (vram or 0) >= 22 else (4 if (vram or 0) >= 15 else 1)
             choices = (1, 4, 8, 32, 64)
@@ -1313,6 +1322,9 @@ class ParallelScreen(Base):
 
     def explain(self) -> Text:
         vram = self.ctx.computer.main_vram_gb
+        if ryzen_policy.model_matches(self.ctx.settings.family, self.ctx.settings.model):
+            return Text("Each request slot needs its own conversation memory at the selected context. "
+                        "Multiple slots require DFlash2 and enough GPU memory for all the requested slots.", style=MUTE)
         if not vram and self.ctx.computer.usable_gpus:      # T3: a Mac or a Strix Halo PC has a chip whose memory is the computer's own, not a card with a size
             room = self.shared_room()
             if room is not None:                            # S3: a figure from the shared memory
@@ -1921,7 +1933,8 @@ class SaveScreen(Base):
                    [("Drafting", dict(DraftingScreen.CHOICES).get(s.drafting or ("off" if modelstate.layer_off_without_choice(self.ctx.base_config()) else "auto"), "DFlash2 Q4_0 (default)"))] if drafting_choice_available(self.ctx) else []),
                  *([("Parallel", f"{s.parallel} at a time" if s.parallel else f"fit to your card ({8 if (self.ctx.computer.main_vram_gb or 0) >= 22 else 4 if (self.ctx.computer.main_vram_gb or 0) >= 15 else 1})")] if is_inkling else
                    [] if is_hy4 else [
-                     ("Parallel", f"{s.parallel} at a time" if s.parallel else f"fit to your card ({fit_parallel_for(self.ctx.catalog, s, self.ctx.computer.main_vram_gb)})"),
+                     ("Parallel", f"{s.parallel or 1} at a time" if ryzen_policy.model_matches(s.family, s.model) or s.parallel
+                      else f"fit to your card ({fit_parallel_for(self.ctx.catalog, s, self.ctx.computer.main_vram_gb)})"),
                      ("Tuning", {"quick": "quick (about 20 min)", "thorough": "thorough (up to 2 h)", "skip": "skipped"}[s.tune]),
                  ]),
                  ("Access", f"{S.ACCESS_WORDS[s.access]}, port {s.port}" + (", API key on" if s.api_key else ", no API key")),
@@ -2053,7 +2066,7 @@ class SaveScreen(Base):
             else:
                 model = dict(lines)["Model"].replace("Qwen3.8-Flash-Next ", "")
                 rows = [f"{model} \u00b7 {S.context_label(s.context)} \u00b7 memory {s.kv or 'int8'}",
-                        f"Pictures {'on' if s.vision != 'off' else 'off'} \u00b7 Parallel {s.parallel or 'auto'} \u00b7 Tuning {s.tune}",
+                        f"Pictures {'on' if s.vision != 'off' else 'off'} \u00b7 Parallel {s.parallel or (1 if ryzen_policy.model_matches(s.family, s.model) else 'auto')} \u00b7 Tuning {s.tune}",
                         *self.compact_download_rows(),                                             # T2: also in a small window (offline: each missing thing with its way, 0217 item 5)
                         f"Access {s.access}, port {s.port}"]
             # 0217 item 8: the two folders are rows of their own in a small window too (they were left out, so "Your files" / "Strata data" never showed at 80x24)

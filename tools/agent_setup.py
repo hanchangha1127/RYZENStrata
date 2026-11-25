@@ -25,10 +25,10 @@ ROOT = Path(__file__).resolve().parents[1]
 TERMINAL = ROOT / "terminal"
 WINDOWS = sys.platform == "win32"
 MODEL = "qwen3.8-flash-next-q2_0"
-_WINDOWS_ENGINE_TAG = "ryzen-v0.2.0"
+_WINDOWS_ENGINE_TAG = "ryzen-v0.3.0"
 _WINDOWS_ENGINE_ASSET = "strata-windows-x64-hip.zip"
-_WINDOWS_ENGINE_SHA256 = "4390ab1930b45011dc98717956729c7c80b4e6df3564963c6cb3bf178466da32"
-_WINDOWS_ENGINE_BYTES = 140223501
+_WINDOWS_ENGINE_SHA256 = "a68c818f9fc7c1adb63a5e2d8b300f5e3ca2bd8647ed74c68d945493650e7658"
+_WINDOWS_ENGINE_BYTES = 140224446
 _WINDOWS_ENGINE_URL = f"https://github.com/hanchangha1127/RYZENStrata/releases/download/{_WINDOWS_ENGINE_TAG}/{_WINDOWS_ENGINE_ASSET}"
 _WINDOWS_ENGINE_DEFAULT = ROOT / "dist" / "strata-windows-x64-hip"
 _WINDOWS_ENGINE_REQUIRED = frozenset({
@@ -300,14 +300,24 @@ def verify_api(port: int) -> None:
 
 
 def main() -> None:
+    sys.path.insert(0, str(TERMINAL))
+    from strata_control import ryzen_policy
+    from strata_control.discovery import default_data_dir
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--plan", action="store_true", help="check hardware and print the launch plan without setup")
     parser.add_argument("--build-engine", action="store_true", help="build the Windows HIP engine from source")
     parser.add_argument("--data-dir", type=Path, help="model directory on an SSD")
     parser.add_argument("--port", type=int, default=8080, help="local API port (default: 8080)")
+    parser.add_argument("--parallel", type=int, choices=ryzen_policy.PARALLEL_CHOICES,
+                        help="manual concurrent GPU requests (default: 1)")
+    parser.add_argument("--context", type=int,
+                        help="maximum context tokens per request (default: 262144)")
     args = parser.parse_args()
     if not 1 <= args.port <= 65535:
         parser.error("--port must be between 1 and 65535")
+    if args.context is not None and not 1024 <= args.context <= ryzen_policy.DEFAULT_CONTEXT:
+        parser.error(f"--context must be between 1024 and {ryzen_policy.DEFAULT_CONTEXT} tokens")
     if (platform.machine().lower() not in {"amd64", "x86_64"}
             or not (WINDOWS or sys.platform == "linux" and "microsoft" not in platform.release().lower())):
         parser.error("RYZENStrata needs Windows x64 or native x86-64 Linux.")
@@ -317,11 +327,12 @@ def main() -> None:
     if args.build_engine and (not WINDOWS or os.environ.get("STRATA_RYZEN_ENGINE_DIR")):
         parser.error("--build-engine is a Windows option and requires STRATA_RYZEN_ENGINE_DIR to be unset.")
 
-    sys.path.insert(0, str(TERMINAL))
-    from strata_control.discovery import default_data_dir
-
     data_dir = (args.data_dir or default_data_dir()).resolve()
     data = ["--data-dir", str(data_dir)]
+    if args.parallel is not None:
+        data += ["--parallel", str(args.parallel)]
+    if args.context is not None:
+        data += ["--context", str(args.context)]
     run([sys.executable, TERMINAL / "setup.py", "--check"])
     launch = [TERMINAL / "strata.py", "launch", "--access", "local", "--port", str(args.port), *data]
     if args.plan:

@@ -54,7 +54,10 @@ print("INFO engine=0.1.39" + (f" batch_slots={fit}" if fit >= 2 else "") +
 if "--fake-stage-plan" in args:
     print("strata serve: layer split: layers 0-11 (CUDA0), 12-23 (CUDA1), 24-35 (CUDA2), "
           "36-47 (CUDA3), one hand-off per window", file=sys.stderr, flush=True)
-print("READY 4096 stop", flush=True)
+if "--draft-vocab-dir" in args:
+    print("READY 4096 stop draft_lang=1", flush=True)
+else:
+    print("READY 4096 stop", flush=True)
 LONG = list(b"LONGREPLY")
 def continued(ids):        # (the whole reply, how much of it the prompt already ends with: a request continued)
     ids = [int(x) for x in ids]
@@ -129,6 +132,9 @@ while True:
         slot = int(f[1]) if f[0] == "BGEN" else None
         max_new = int(f[2] if f[0] == "BGEN" else f[1])
         ids = f[-1].split(",")
+        if log and "--draft-vocab-dir" in args:
+            lang = next((key for key in f if key.startswith("draft_lang=")), "missing")
+            log.write(f"LANG {f[0]} {lang}\n"); log.flush()
         if bytes(int(x) & 255 for x in ids).find(b"REFUSEME") >= 0:   # #1059: refused up front, then idle (no DONE)
             print("ERR refused: images are not enabled", flush=True)
             continue
@@ -743,6 +749,19 @@ class BatchLegAccounting(FakeEngineCase):
 
 
 class ParallelService(FakeEngineCase):
+    def test_ryzen_multilingual_requests_keep_their_language_on_each_leg(self):
+        self.start(2, more=("--gpu-experts-only", "--draft-vocab-dir", "data"))
+        result = self.race("LONGREPLY 한국어로 설명해 주세요", "LONGREPLY expliquez en français")
+        self.assertEqual(len(result), 2)
+        lines = self.log.read_text().splitlines()
+        self.assertIn("LANG GEN draft_lang=ko", lines)
+        self.assertIn("LANG BGEN draft_lang=fr", lines)
+        self.assertNotIn("LANG BGEN missing", lines)
+
+    def test_ryzen_refuses_an_engine_that_reduced_the_slot_count(self):
+        with self.assertRaisesRegex(server.EngineDied, "Requested 4 Ryzen slots, but the engine reported 2"):
+            self.start(4, fit=2, more=("--gpu-experts-only",))
+
     """The real StrataEngine and Service over HTTP, the fake engine behind them: slots, queues, benchmarks, telemetry.
     The yielding, restart and failure tests are in serve/test_parallel_yield.py (this file alone ran past 100 s)."""
 

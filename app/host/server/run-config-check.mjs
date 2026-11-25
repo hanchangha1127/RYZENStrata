@@ -10,7 +10,7 @@
  * Each issue is { level, code, key, line, params, message }: `code` and `params` are what the screen translates (src/lib/run-config-issues.ts),
  * `message` is the same sentence in English for logs and the Details of a refused start.
  */
-import { NATIVE_FIELDS } from './native-settings.mjs';
+import { NATIVE_FIELDS, nativeSettingsFields } from './native-settings.mjs';
 import { isHy4 } from './hy4.mjs';
 import { isInkling } from './inkling.mjs';
 
@@ -83,7 +83,7 @@ export function checkRunConfig(text, { known = KNOWN_KEYS } = {}) {
     issues.push({ level: 'error', code: 'not-object', key: null, line: null, params: {}, message: 'The settings file must hold one object, { … }, with the settings inside.' });
     return { ok: false, issues };
   }
-  const fields = new Map(NATIVE_FIELDS.map(f => [f.id, f]));
+  const fields = new Map(nativeSettingsFields(config.ryzen_profile === true).map(f => [f.id, f]));
   for (const [key, value] of Object.entries(config)) {
     if (!known.has(key) && !key.startsWith('ui_')) {   // ui_* are the app's own notes in the file (resource profile, picture device)
       const near = nearestKey(key, known);

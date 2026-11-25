@@ -106,7 +106,13 @@ export function withPromptCacheSpread(args){
 export function withoutPromptCacheSpread(args){
  return (args??[]).map(String).filter(a=>a!=='--prompt-cache-spread');
 }
-export function validateNativeSettings(values){
+const RYZEN_PARALLEL_CHOICES=[1,2,4,8,16];
+export function nativeSettingsFields(ryzen=false){
+ return ryzen?NATIVE_FIELDS.map(field=>field.id==='parallel'
+  ?{...field,max:16,hint:'Choose 1, 2, 4, 8 or 16 requests. The default is 1. Each additional slot needs GPU memory for its context.'}
+  :field):NATIVE_FIELDS;
+}
+export function validateNativeSettings(values,ryzen=false){
  if(!values||typeof values!=='object'||Array.isArray(values))throw new Error('Native settings must be an object.');
  const result={};
  for(const [key,value] of Object.entries(values)){
@@ -114,8 +120,9 @@ export function validateNativeSettings(values){
   if(key==='args'){if(!Array.isArray(value)||value.length>200||value.some(v=>typeof v!=='string'||v.length>4000||/[\n\r\0]/.test(v))||value.some(v=>['--host','--port','--api-key'].includes(v)))throw new Error('Engine arguments must be text values. Network access stays managed by Strata.');result.args=[...value];continue;}
   if(key==='env'){if(!value||typeof value!=='object'||Array.isArray(value))throw new Error('Engine environment must be an object.');const env={};for(const [name,text] of Object.entries(value)){if(!ENV_FLAG.test(name)||typeof text!=='string'||text.length>4000||text.includes('\0'))throw new Error('Use STRATA_ environment flags with text values.');env[name]=text;}result.env=env;continue;}
   if(key==='sampling'){if(!value||typeof value!=='object'||Array.isArray(value))throw new Error('Sampling must be an object.');const limits={temperature:[0,10],top_p:[Number.MIN_VALUE,1],top_k:[1,64],min_p:[0,1],repetition_penalty:[Number.MIN_VALUE,10],presence_penalty:[0,10],frequency_penalty:[0,10],penalty_last_n:[0,1048576],seed:[1,2147483647]};for(const [name,n] of Object.entries(value)){if(name==='experimental_speed_projection'){if(typeof n!=='boolean')throw new Error('Speed projection must be on or off.');continue;}if(!limits[name]||!Number.isFinite(n)||(['top_k','seed','penalty_last_n'].includes(name)&&!Number.isInteger(n))||n<limits[name][0]||n>limits[name][1])throw new Error(`Choose a valid sampling ${name}.`);}result.sampling={...value};continue;}
-  const field=NATIVE_FIELDS.find(f=>f.id===key);if(!field)throw new Error(`Unknown native setting: ${key}`);
+  const field=nativeSettingsFields(ryzen).find(f=>f.id===key);if(!field)throw new Error(`Unknown native setting: ${key}`);
   if(value===null||value===''){result[key]=null;continue;}
+  if(ryzen&&key==='parallel'&&!RYZEN_PARALLEL_CHOICES.includes(value))throw new Error('Concurrent requests must be 1, 2, 4, 8 or 16.');
   if(field.type==='number'&&(!Number.isFinite(value)||value<field.min||value>field.max||!Number.isInteger(value)))throw new Error(`${field.label}: choose a whole number from ${field.min} to ${field.max}.`);
   if(field.type==='boolean'&&typeof value!=='boolean')throw new Error(`${field.label}: choose on or off.`);
   if(field.type==='string'&&(typeof value!=='string'||value.length>256))throw new Error(`${field.label}: enter at most 256 characters.`);

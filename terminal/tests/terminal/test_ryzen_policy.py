@@ -26,11 +26,39 @@ def test_launch_defaults_and_unsupported_choices():
     launch = LaunchSettings()
     assert policy.launch_problem(launch) is None
     policy.set_launch_defaults(launch)
+    assert launch.parallel == 1
     assert (launch.family, launch.model) == ("qwen", "Q2_0")
     assert (launch.context, launch.kv, launch.drafting, launch.vision) == (262144, "int8", "dflash2", "off")
     assert policy.launch_problem(LaunchSettings(family="qwen", model="IQ3_S")) == policy.MODEL_ERROR
     assert policy.launch_problem(LaunchSettings(vision="cpu"))
     assert policy.launch_problem(LaunchSettings(drafting="mtp"))
+
+
+@pytest.mark.parametrize("slots", policy.PARALLEL_CHOICES)
+def test_requested_gpu_slots_reach_native_engine(monkeypatch, tmp_path, slots):
+    from serve import server
+    from strata_control import drafting
+
+    launch = LaunchSettings(parallel=slots)
+    policy.set_launch_defaults(launch)
+    assert launch.parallel == slots and policy.launch_problem(launch) is None
+    cfg = {"model_name": policy.MODEL_NAME, "args": ["--pack", str(tmp_path / "packs" / "q2_0"), "--native", "q.gguf"]}
+    policy.apply_runtime(cfg, launch.context, launch.drafting, launch.parallel)
+    monkeypatch.setattr(drafting, "stock_q4_ok", lambda _: True)
+    assert policy.runtime_problem(cfg) is None
+    args = server.engine_args(cfg, announce=False)
+    if slots > 1:
+        assert args.count("--batch") == 1 and args[args.index("--batch") + 1] == str(slots)
+        assert args[args.index("--draft") + 1] == "dflash2"
+    else:
+        assert "--batch" not in args
+
+
+def test_parallel_limits_and_unassisted_decoding():
+    for n in (True, 0, 3, 16.0, "auto", 32):
+        assert policy.launch_problem(LaunchSettings(parallel=n))
+    assert policy.launch_problem(LaunchSettings(parallel=2, drafting="off"))
+    assert policy.launch_problem(LaunchSettings(parallel=1, drafting="off")) is None
 
 
 def test_runtime_settings_replace_overrides_and_validate_the_native_profile():

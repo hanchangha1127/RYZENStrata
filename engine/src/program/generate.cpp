@@ -1216,7 +1216,7 @@ struct Options {
 
 void usage() {
 #if defined(STRATA_RYZEN_PROFILE)
-    std::fprintf(stderr, "  --gpu-experts-only   run the RYZENStrata HIP profile v3 (enabled by default)\n");
+    std::fprintf(stderr, "  --gpu-experts-only   run the RYZENStrata HIP profile v4 (enabled by default)\n");
     std::fprintf(stderr, "  --draft-vocab-dir DIR  enable per-request DFlash2 language vocabularies in --serve\n");
 #endif
     std::fprintf(stderr,
@@ -4318,6 +4318,7 @@ int main(int argc, char** argv) {
         }
         }
     }
+    const int requested_ryzen_slots = o.gpu_experts_only ? o.batch : 0;
     if (o.gpu_experts_only) {
         const bool remote = std::any_of(o.expert_cache_remote.begin(), o.expert_cache_remote.end(),
                                        [](int64_t n) { return n > 0; }) ||
@@ -4329,11 +4330,32 @@ int main(int argc, char** argv) {
         }
         if (o.no_pool || o.no_capture || o.graph_only || o.gpu_only_full || o.gpu_stages || o.no_fast_select ||
             o.native_flash_attn_short || o.cpu_oracle_q8_0 || o.pool_measure || o.prefill_chunk <= 0 ||
-            o.peer_device >= 0 || remote || !o.layer_split.empty() || o.batch > 0 || o.pipeline_windows > 0 ||
+            o.peer_device >= 0 || remote || !o.layer_split.empty() || o.pipeline_windows > 0 ||
             o.spec_split || o.spec < 2 || o.spec > strata::core::kGpuOnlyVerifyMaxRows) {
             std::fprintf(stderr, "RYZENStrata requires a single GPU and the regular GPU prompt and verify paths (2 to %d verify rows)\n",
                          strata::core::kGpuOnlyVerifyMaxRows);
             return 2;
+        }
+        if (o.batch && (!o.serve || (o.batch != 2 && o.batch != 4 && o.batch != 8 && o.batch != 16) ||
+                        o.draft != "dflash2" || o.batch_groups > 1 || o.kv_resident != 0)) {
+            std::fprintf(stderr, "RYZENStrata parallel serving requires DFlash2, fully resident KV, and 2, 4, 8, or 16 slots\n");
+            return 2;
+        }
+        if (o.batch) {
+            // Active conversations already own their KV and recurrent state on the GPU. Host
+            // checkpoints for reusing old prompts can exhaust Windows commit as slots fill.
+            o.prompt_cache = 0;
+            o.conversation_cache_mib = 0;
+            // There is no earlier prompt checkpoint to replay. The live DFlash2 K/V ring
+            // follows its slot on the GPU; logging its activation rows on the host is optional.
+            if (std::getenv("STRATA_DF2_RING_LOG") == nullptr) {
+#if defined(_WIN32)
+                _putenv_s("STRATA_DF2_RING_LOG", "0");
+#else
+                setenv("STRATA_DF2_RING_LOG", "0", 0);
+#endif
+            }
+            std::fprintf(stderr, "RYZENStrata: batch KV stays on the GPU; host prompt checkpoints are disabled\n");
         }
         if (o.draft_auto || o.draft_fallback == "mtp" || (!o.mtp.empty() && o.draft != "dflash2") || o.draft == "mtp") {
             std::fprintf(stderr, "RYZENStrata supports Q4_0 DFlash2 or unassisted decoding\n");
@@ -7978,6 +8000,10 @@ int main(int argc, char** argv) {
         return stages.empty() || batch_groups_for(false).groups <= 1;
     }();
     const char* batch_mtp_env = std::getenv("STRATA_BATCH_MTP");
+    if (o.gpu_experts_only && o.batch && !batch_df2_wanted) {
+        std::fprintf(stderr, "RYZENStrata parallel slots require DFlash2; check STRATA_BATCH_DF2\n");
+        return 2;
+    }
     bool batch_mtp = o.batch_mtp || (batch_mtp_env != nullptr && batch_mtp_env[0] != '\0' && batch_mtp_env[0] != '0') || batch_df2_wanted;
     if (batch_mtp) {
         // (--pipeline-windows is already off with --batch slots)
@@ -8139,6 +8165,18 @@ int main(int argc, char** argv) {
     if (o.batch > 0) {
         bslot_ss.resize(1 + stages.size());
         int fit = o.batch;   // the slots every stage could carve
+        if (o.gpu_experts_only) {
+            const auto& layout = strata::kernels::cpu::expert_layout();
+            uint64_t expert_bytes = 0;
+            for (int64_t l = 0; l < g.n_layers; ++l) expert_bytes += g.n_expert * layout.blob_bytes(l);
+            const uint64_t sessions = o.batch * strata::core::session_bytes(g, o.max_context, K, 0, -1);
+            const uint64_t free = strata::core::device_free_bytes();
+            if (sessions + expert_bytes > free) {
+                std::fprintf(stderr, "RYZENStrata: insufficient GPU memory for %d slots at context %lld: additional slot sessions and resident experts need at least %.2f GiB, %.2f GiB available\n",
+                             o.batch, (long long)o.max_context, (double)(sessions + expert_bytes) / 1073741824.0, (double)free / 1073741824.0);
+                return 1;
+            }
+        }
         // The slots' host side.  With KV streaming every session keeps its whole K/V in pinned RAM (11 GiB a
         // conversation over both stages at a 1M context), and nothing checked that the slots' copies fit: --batch 4 at
         // 1M on a 156 GB box with the n-gram table locked started, and the kernel killed the engine in its first
@@ -8231,6 +8269,10 @@ int main(int argc, char** argv) {
             cudaMemGetInfo(&fb, &tb);
             std::fprintf(stderr, "strata generate: --batch: %d slot sessions on CUDA%d (%.2f GiB each); %.2f GiB free\n",
                          (int) bslot_ss[k].size(), dev, (double) bytes / 1073741824.0, (double) fb / 1073741824.0);
+        }
+        if (o.gpu_experts_only && fit != o.batch) {
+            std::fprintf(stderr, "RYZENStrata: insufficient GPU memory for all %d requested slot sessions\n", o.batch);
+            return 1;
         }
         for (auto& v : bslot_ss) if ((int) v.size() > fit) v.resize((size_t) fit);   // the same count on every stage
         if (fit < 2) {
@@ -10416,6 +10458,11 @@ int main(int argc, char** argv) {
         }
         return held;
     };
+    if (o.gpu_experts_only && o.batch && count_gpu_held() != g.n_layers * g.n_expert) {
+        std::fprintf(stderr, "RYZENStrata: insufficient GPU memory to keep every expert resident with %d slots at context %lld\n",
+                     o.batch, (long long)o.max_context);
+        return 1;
+    }
     if (srcp == &src && file_tier_idle_ok) {
         gpu_held_now = count_gpu_held();
         gpu_holds_all = gpu_held_now == g.n_layers * g.n_expert;
@@ -13770,6 +13817,12 @@ int main(int argc, char** argv) {
             for (size_t b = 0; b < slot_df2.size(); ++b) {
                 auto& d = *slot_df2[b];
                 if (!d.clone_bind(df2, err)) { std::fprintf(stderr, "strata serve: STRATA_BATCH_DF2: slot %zu: %s\n", b, err.c_str()); return 1; }
+                // A slot's graphs retain its output-head pointers. Detach from the admission head
+                // before READY so a language switch can never invalidate another live request.
+                if (o.gpu_experts_only && !o.draft_vocab_dir.empty() && !d.switch_vocab(native_head, df2_vocab_path(), err)) {
+                    std::fprintf(stderr, "RYZENStrata: allocating DFlash2 vocabulary for slot %zu: %s\n", b, err.c_str());
+                    return 1;
+                }
                 d.set_max_drafts((o.mtp_max_t > 0 ? std::min(o.mtp_max_t, o.spec) : o.spec) - 1);
                 if (!d.prepare(d.landing(), err)) { std::fprintf(stderr, "strata serve: STRATA_BATCH_DF2: slot %zu: %s\n", b, err.c_str()); return 1; }
             }
@@ -16541,9 +16594,14 @@ int main(int argc, char** argv) {
         }
         g_gpu_pause_idle.idle(gpu_pause_now());   // AMD on Linux: the gap before the first request starts here (the start-up's own pauses are not a "between")
         bool language_vocab = false;
+        if (requested_ryzen_slots && (o.batch != requested_ryzen_slots || !batch_df2 || !use_df2)) {
+            std::fprintf(stderr, "RYZENStrata: could not start all %d requested GPU DFlash2 slots\n", requested_ryzen_slots);
+            return 1;
+        }
 #if defined(STRATA_RYZEN_PROFILE) && defined(STRATA_HAVE_DFLASH2)
         language_vocab = use_df2 && df2_solo && !o.draft_vocab_dir.empty() && !df2.head_native();
         std::string active_draft_lang;   // empty selects the original --mtp-draft-vocab subset
+        std::vector<std::string> slot_draft_lang(slot_df2.size());
 #endif
         std::printf("READY %lld stop hold holdb%s\n", (long long) o.max_context, language_vocab ? " draft_lang=1" : "");
         std::fflush(stdout);
@@ -16956,7 +17014,7 @@ int main(int argc, char** argv) {
         // STRATA_BATCH_DF2_MAXX=N: at most N draft rows a slot and window (default kDrafts)
         const double df2_conf = [&] { const char* e = std::getenv("STRATA_BATCH_DF2_CONF"); return e != nullptr && e[0] != '\0' ? std::atof(e) : (o.draft_conf > 0.0 ? o.draft_conf : 0.35); }();
         const int df2_cap = [] { const char* e = std::getenv("STRATA_BATCH_DF2_MAXX"); return e != nullptr && e[0] != '\0' ? std::max(0, std::atoi(e)) : 99; }();
-        const bool batch_df2_defer = [] { const char* e = std::getenv("STRATA_BATCH_DF2_DEFER"); return !(e != nullptr && e[0] == '0'); }();
+        const bool batch_df2_defer = !o.gpu_experts_only && [] { const char* e = std::getenv("STRATA_BATCH_DF2_DEFER"); return !(e != nullptr && e[0] == '0'); }();
         // timing of the batch windows since the slots were last all idle (one stderr line then)
         double bt_run = 0, bt_commit = 0, bt_emit = 0;
         double bt_wait0 = 0, bt_pool0 = 0;
@@ -17017,7 +17075,7 @@ int main(int argc, char** argv) {
         // a slot copy can go device to device (the same bytes into the same places as the checkpoint/K-V image
         // round trip through host memory, which costs ~40-90 ms per admission on a 4-card split); each device is
         // synchronized once before and once after.  Opt-in: STRATA_SLOT_COPY_DIRECT=1 (default: the host path).
-        static const bool slot_copy_direct = [] {
+        const bool slot_copy_direct = o.gpu_experts_only || [] {
             const char* v = std::getenv("STRATA_SLOT_COPY_DIRECT");
             return v != nullptr && v[0] != '\0' && v[0] != '0';
         }();
@@ -17121,7 +17179,7 @@ int main(int argc, char** argv) {
             // slot's pools, residency included; only the running state comes from the checkpoint.
             // Opt-in (#5864, off until the two-card measurement): STRATA_SLOT_CKPT_KV_DIRECT=1, with
             // STRATA_SLOT_COPY_DIRECT=1; unset, the image, as before.)
-            static const bool ckpt_kv_direct = [] {
+            const bool ckpt_kv_direct = o.gpu_experts_only || [] {
                 const char* v = std::getenv("STRATA_SLOT_CKPT_KV_DIRECT");
                 return v != nullptr && v[0] != '\0' && v[0] != '0';
             }();
@@ -17276,15 +17334,20 @@ int main(int argc, char** argv) {
             // depends on which slots are active, not on the drafts: the captured batch graphs are reused).  More slots than rows: no drafts, the slots
             // take turns as in the plain windows.  A draft row a slot has no room for (its last tokens, the context's end) is not asked for.
             int df2_extra[64] = {};
+            // Leave space for drafts in every Ryzen cohort, including when 8 or 16 slots are live.
+            const int cohort_cap = batch_df2 && o.gpu_experts_only ? win_cap / 2 : win_cap;
             if (batch_df2) {
                 int act_ids[64] = {}, nact = 0;
-                for (size_t b = 0; b < bs.size() && nact < (int) (sizeof act_ids / sizeof act_ids[0]); ++b)
+                for (size_t offset = 0; offset < bs.size() && nact < (o.gpu_experts_only ? cohort_cap : 64); ++offset) {
+                    const size_t b = (next_slot + offset) % bs.size();
                     if (bs[b].active) act_ids[nact++] = (int) b;
+                }
                 const int spare = std::max(0, win_cap - nact);
                 for (int k = 0; k < nact && nact > 0; ++k) {
                     const BSlot& q = bs[(size_t) act_ids[k]];
                     int want = spare / nact + (k < spare % nact ? 1 : 0);
                     want = std::min(want, (int) strata::core::Dflash2Drafter::kDrafts);
+                    if (o.gpu_experts_only) want = std::min(want, o.spec - 1);
                     want = std::min<int>(want, (int) std::max<int64_t>(0, strata::core::slot_cap(q.max_new, q.hold) - q.produced - 1));
                     want = std::min<int>(want, (int) std::max<int64_t>(0, (int64_t) o.max_context - q.p - 2));
                     want = std::min(want, df2_cap);
@@ -17323,7 +17386,7 @@ int main(int argc, char** argv) {
                 }
 #endif
             }
-            for (size_t offset = 0; offset < bs.size(); ++offset) {
+            for (size_t offset = 0; offset < bs.size() && A < cohort_cap; ++offset) {
                 const int b = (int) ((next_slot + offset) % bs.size());
                 if (!bs[(size_t) b].active) continue;
                 const int extra = batch_df2 ? (b < (int) (sizeof df2_extra / sizeof df2_extra[0]) ? df2_extra[b] : 0) : batch_mtp ? 1 : 0;
@@ -19137,7 +19200,8 @@ int main(int argc, char** argv) {
             }
             const int64_t n = (int64_t) ids.size();
 #if defined(STRATA_RYZEN_PROFILE) && defined(STRATA_HAVE_DFLASH2)
-            if (req_draft_lang != active_draft_lang) {
+            auto& active_language = admit_slot >= 0 && batch_df2 ? slot_draft_lang[(size_t)admit_slot] : active_draft_lang;
+            if (req_draft_lang != active_language) {
                 if (!language_vocab || (!req_draft_lang.empty() && req_draft_lang != "en" && req_draft_lang != "ko" &&
                     req_draft_lang != "ja" && req_draft_lang != "zh" && req_draft_lang != "fr")) {
                     std::printf("ERR unsupported DFlash2 draft language\n");
@@ -19146,13 +19210,14 @@ int main(int argc, char** argv) {
                 const auto path = req_draft_lang.empty() ? df2_vocab_path() :
                     o.draft_vocab_dir + "/draft_vocab_" + req_draft_lang + ".bin";
                 std::string why;
-                if (!df2.switch_vocab(native_head, path, why)) {
+                auto& drafter = admit_slot >= 0 && batch_df2 ? *slot_df2[(size_t)admit_slot] : df2;
+                if (!drafter.switch_vocab(native_head, path, why)) {
                     std::printf("ERR draft vocabulary: %s\n", why.c_str());
                     continue;
                 }
-                active_draft_lang = req_draft_lang;
+                active_language = req_draft_lang;
                 std::fprintf(stderr, "strata dflash2: draft language %s, %lld tokens\n",
-                             active_draft_lang.empty() ? "default" : active_draft_lang.c_str(), (long long)df2.n_draft_vocab());
+                             active_language.empty() ? "default" : active_language.c_str(), (long long)drafter.n_draft_vocab());
             }
 #endif
             // --draft auto: this request's drafter.  Without the DFlash2 drafter loaded every request uses the MTP, as before.

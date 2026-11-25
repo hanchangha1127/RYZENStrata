@@ -61,16 +61,6 @@ def _port(value: str) -> int:
     return p
 
 
-def _parallel(value: str) -> int:
-    try:
-        p = int(value)
-    except ValueError:
-        raise argparse.ArgumentTypeError(f"'{value}' is not a number of requests. Use 1 to 64, or leave it out to fit your card.") from None
-    if not 1 <= p <= 64:
-        raise argparse.ArgumentTypeError(f"{p} requests at once is outside what the engine can do. Use 1 to 64.")
-    return p
-
-
 def add_parsers(sp: argparse._SubParsersAction) -> list[argparse.ArgumentParser]:
     p = sp.add_parser(
         "launch", help="guided setup, serve and monitor (the screens), or the same with flags", epilog=EXAMPLES,
@@ -92,7 +82,8 @@ def add_parsers(sp: argparse._SubParsersAction) -> list[argparse.ArgumentParser]
     g.add_argument("--context", type=_context, metavar="SIZE", help="how much text it remembers at once: 32k, 64k, 128k, 256k or a number of tokens")
     g.add_argument("--kv", type=_choice("a memory format", S.KV_MODES), metavar="FORMAT", help="Q8 KV cache (int8)")
     g.add_argument("--vision", type=_choice("a picture setting", S.VISION_MODES), help=argparse.SUPPRESS)
-    g.add_argument("--parallel", type=_parallel, help=argparse.SUPPRESS)
+    g.add_argument("--parallel", type=int, choices=ryzen_policy.PARALLEL_CHOICES,
+                   help="concurrent requests on this GPU (default 1, multiple slots require DFlash2)")
     g.add_argument("--mtp", type=_choice("a draft layer setting", S.MTP_MODES), help=argparse.SUPPRESS)
     g.add_argument("--drafting", type=_choice("a drafting setting", S.DRAFTING_MODES), metavar="dflash2|off",
                    help="DFlash2 Q4_0 drafting (default) or off")
@@ -298,6 +289,8 @@ def _parallel_word(plan: dict, s: S.LaunchSettings) -> str:
     """The plan's parallel word: fit to the card unless a number was given (1 for Hy4-Flash)."""
     if s.family == "hy4-flash":
         return "1"
+    if ryzen_policy.model_matches(s.family, s.model):
+        return str(s.parallel or 1)
     return str(s.parallel or "fit to your card")
 
 
@@ -708,7 +701,7 @@ def run_launch(a: argparse.Namespace) -> int:
                 for i in items:
                     sm = store.summary(i)
                     is_hy4 = i.family == "hy4-flash"
-                    req = "1 request" if is_hy4 else ((str(i.parallel) + ' request' + ('s' if i.parallel != 1 else '')) if i.parallel else 'fit to card')
+                    req = S.preset_parallel_label(i)
                     tuned = "built-in" if is_hy4 else (('tuned ' + (i.tuned_at or '')) if i.is_tuned else 'not tuned')
                     _say(f"{i.name:<28} {sm['model']:<14} {S.context_label(i.context):<6} "
                          f"{req:<14} "

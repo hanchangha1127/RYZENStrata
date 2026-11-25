@@ -1315,7 +1315,7 @@ class Runner:
             args += ["--experimental-speed-projection", "off"]
         if s.draft_vocab and fam in modelstate.HELPER_FAMILIES:
             args += ["--draft-vocab", s.draft_vocab]
-        args += ["--backend", "hip", "--parallel", "1", "--drafter", self.resolved_drafting(fam)]
+        args += ["--backend", "hip", "--parallel", str(s.parallel or 1), "--drafter", self.resolved_drafting(fam)]
         data = s.data_dir or self.existing_data_dir()
         if data:
             args += ["--data-dir", str(data)]
@@ -2110,7 +2110,7 @@ class Runner:
         self.say_remembered_cards(base)
         cfg["gpu"] = base["gpu"]
         ryzen_policy.apply_runtime(cfg, self.s.context or ryzen_policy.DEFAULT_CONTEXT,
-                                   self.resolved_drafting(self.s.family))
+                                   self.resolved_drafting(self.s.family), self.s.parallel or 1)
         wait = self.start_wait()
         if wait > 600 and not cfg.get("engine_ready_s"):     # the server's own wait for the engine (900 s) must not end before the start's
             cfg["engine_ready_s"] = wait + 60

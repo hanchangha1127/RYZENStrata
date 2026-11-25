@@ -781,6 +781,7 @@ class StrataEngine:
         self.can_stop = False            # the engine honours a STOP line mid-request (READY <ctx> stop)
         self.can_hold = False            # the engine takes GEN hold=N:ID (READY <ctx> ... hold)
         self.request_vocab = "--draft-vocab-dir" in args
+        self.ryzen_profile = ryzen_policy.GPU_ONLY_FLAG in args
         self.can_draft_lang = False
         self.can_hold_batch = False      # ... and its --batch slots end at the hold too, BDONE hold (READY ... holdb)
         self.last = {}
@@ -1026,6 +1027,12 @@ class StrataEngine:
         self.wlock = threading.Lock()                   # stdin writes from several request threads
         self.pump = threading.Thread(target=self._pump, daemon=True)
         self.pump.start()
+        if self.ryzen_profile and "--batch" in args:
+            requested = int(args[args.index("--batch") + 1])
+            if self.batch != requested:
+                self.close()
+                raise EngineDied(f"Requested {requested} Ryzen slots, but the engine reported {self.batch or 1}. "
+                                 "Choose fewer parallel requests or a shorter context.")
 
     def _pump(self):
         proc, lines = self.proc, self.lines             # this process's: a restart replaces both (#344)
@@ -1972,7 +1979,8 @@ class StrataEngine:
 
     @property
     def slot_read(self) -> bool:
-        return bool((self.info or {}).get("slot_read")) and os.environ.get("STRATA_SLOT_READ") != "0"
+        return (not getattr(self, "ryzen_profile", False) and bool((self.info or {}).get("slot_read"))
+                and os.environ.get("STRATA_SLOT_READ") != "0")
 
     def _several_chats(self) -> bool:
         """Requests ran in two or more slots within the last PARALLEL_STICKY_S seconds."""
@@ -2042,6 +2050,10 @@ class StrataEngine:
         keys0 = self.sampling_keys({k: v for k, v in (sampling or {}).items() if k != HOLD_KEY},
                                    hy4=getattr(self, "hy4_engine", False),
                                    inkling=getattr(self, "inkling_engine", False))   # (the hold's key goes on per leg: leg_keys below)
+        if getattr(self, "can_draft_lang", False) and getattr(cancel, "_strata_draft_lang", None):
+            keys0 += f" draft_lang={cancel._strata_draft_lang}"
+        # The co-prefill protocol carries token IDs only. Ryzen admission also needs the slot's draft language.
+        coalesce = COALESCE_PREFILL > 1 and not embeddings and not getattr(self, "ryzen_profile", False)
         # logprobs: only an admission's token can have an LP line here (the slot's "BT" lines carry none), so the
         # server refuses these requests unless max_tokens is 1.  The lines go to the request itself, through its
         # cancel Event: several requests read control lines at once, and the engine's lp_lines is one attribute.
@@ -2070,7 +2082,7 @@ class StrataEngine:
         carry = {}          # #1869: the figures of the legs that ended in a hand-back to the solo path (the final DONE adds to them)
         yielded_legs = []    # prompt reads that gave way before producing output
         ok = yield from self._take_control(cancel, len(prompt), new=True,
-                                           prompt=prompt if (COALESCE_PREFILL > 1 and not embeddings) else None)
+                                           prompt=prompt if coalesce else None)
         if not ok:
             self._release_preslot(cancel)
             return
@@ -2260,7 +2272,7 @@ class StrataEngine:
                         raise QueueWaitExpired("the inference queue wait deadline expired; retry later")
                     self.slot_live[slot] = live
                     self._last_done = None                  # (#879: this admission's DONE decides below)
-                    if COALESCE_PREFILL > 1 and not embeddings:
+                    if coalesce:
                         self._coalesce(cancel, prompt)
                     self._send(f"{head} {','.join(str(int(t)) for t in prompt)}")
                     if deadline is not None:
@@ -3677,6 +3689,11 @@ def engine_args(cfg: dict, exe: str | None = None, *, announce: bool = True) -> 
     and without leaving a note for the next engine start (the retry arguments of mtp_retry_args)."""
     if cfg.get("ryzen_profile"):
         args = list(cfg["args"])
+        slots = cfg.get("parallel")
+        if issue := ryzen_policy.parallel_problem(slots, cfg.get("drafting") or "off"):
+            raise ValueError(issue)
+        if slots and slots > 1:
+            args.extend(["--batch", str(slots)])
         # Stream the Windows expert-cache fill without keeping GGUF pages in the OS file cache.
         if os.name == "nt" and "--ssd-experts" not in args:
             args.append("--ssd-experts")

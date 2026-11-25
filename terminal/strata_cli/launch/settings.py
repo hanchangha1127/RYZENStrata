@@ -15,6 +15,8 @@ import re
 from dataclasses import asdict, dataclass, field, fields
 from typing import Any
 
+from strata_control import ryzen_policy
+
 SCHEMA = "strata.launch/1"
 
 #: setup.py's CONTEXTS (kept here only as the fallback when the installer files are not next to this terminal).
@@ -316,10 +318,21 @@ def inkling_slots_notices(s: LaunchSettings, *, vram_gb: float | None, ram_gb: f
     return out
 
 
+def preset_parallel_label(s: LaunchSettings) -> str:
+    if s.family == "hy4-flash" or (not s.parallel and ryzen_policy.model_matches(s.family, s.model)):
+        return "1 request"
+    if not s.parallel:
+        return "fit to card"
+    return f"{s.parallel} request" + ("s" if s.parallel != 1 else "")
+
+
 def check_parallel(s: LaunchSettings, *, vram_gb: float | None, fitted: int | None = None, ram_gb: float | None = None, vendor: str | None = None) -> list[Notice]:
     out: list[Notice] = []
     if s.parallel is None:
         return out
+    if ryzen_policy.model_matches(s.family, s.model):
+        problem = ryzen_policy.parallel_problem(s.parallel, s.drafting)
+        return [Notice("error", problem, "")] if problem else []
     max_p = 64                                                # what any engine takes at all; the family's own limit is below
     if not 1 <= int(s.parallel) <= max_p:
         out.append(Notice("error", f"{s.parallel} requests at once is outside what the engine can do (1 to {max_p}).",
